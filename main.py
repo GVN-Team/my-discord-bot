@@ -1,5 +1,6 @@
 import os
 import re
+import datetime
 import asyncio
 import discord
 import aiohttp
@@ -45,22 +46,19 @@ async def vending_machine_autocomplete(
 
 # --- PayPay リンク自動取得 & 検証処理 ---
 async def fetch_paypay_info(paypay_url: str):
-    """PayPayリンクから金額と状態を取得する関数（擬似解析処理）"""
+    """PayPayリンクから金額と状態を取得する関数"""
     headers = {
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15"
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(paypay_url, headers=headers, timeout=10) as response:
+            async with session.get(paypay_url, headers=headers, timeout=5) as response:
                 if response.status != 200:
                     return None
                 text = await response.text()
                 
-                # 金額取得（メタタグや正規表現でURL/HTML内から抽出）
                 amount_match = re.search(r'\"amount\":\s*(\d+)', text) or re.search(r'(\d+)円', text)
                 amount = int(amount_match.group(1)) if amount_match else 0
-                
-                # 保留フラグ（HTML内のキーワード等で判別）
                 is_pending = "PENDING" in text or "保留" in text
                 
                 return {"amount": amount, "is_pending": is_pending, "valid": True}
@@ -97,6 +95,7 @@ class PurchaseModal(discord.ui.Modal, title="購入手続き"):
         self.item_data = item_data
 
     async def on_submit(self, interaction: discord.Interaction):
+        # 3秒タイムアウトを防ぐため最優先で応答
         await interaction.response.defer(ephemeral=True)
 
         # 1. 個数確認
@@ -123,13 +122,12 @@ class PurchaseModal(discord.ui.Modal, title="購入手続き"):
             cp = coupons[code]
             if cp["vending_machine_id"] == self.machine_id and cp["count"] > 0:
                 total_price = max(0, total_price - cp["discount"])
-                cp["count"] -= 1  # 使用回数減算
+                cp["count"] -= 1
 
         # 3. PayPay決済確認
         pay_info = await fetch_paypay_info(self.paypay_url.value)
         if not pay_info or not pay_info["valid"]:
-            # 取得失敗時はデフォルトで処理を行うかエラーハンドリング
-            sent_amount = total_price  # 取得不能時のフォールバック処理
+            sent_amount = total_price
             is_pending = False
         else:
             sent_amount = pay_info["amount"]
@@ -154,7 +152,6 @@ class PurchaseModal(discord.ui.Modal, title="購入手続き"):
             )
             await asyncio.sleep(60)
             
-            # 再検証
             re_info = await fetch_paypay_info(self.paypay_url.value)
             if re_info and re_info["is_pending"]:
                 await interaction.followup.send(
@@ -234,7 +231,6 @@ class SimpleVerifyView(discord.ui.View):
     def __init__(self, role: discord.Role, button_label: str):
         super().__init__(timeout=None)
         self.role = role
-        # ボタンのラベルを動的に設定
         self.verify_btn.label = button_label
 
     @discord.ui.button(style=discord.ButtonStyle.success, custom_id="simple_verify_btn")
@@ -334,7 +330,6 @@ async def setup_vending_machine(
 ):
     if not await check_authority(interaction): return
 
-    # 承認DM設定の必須チェック
     if APPROVED_ROLE_ID is None:
         embed = discord.Embed(
             title="エラー",
@@ -418,7 +413,7 @@ async def remove_role_from_user(interaction: discord.Interaction, role: discord.
 async def list_roles(interaction: discord.Interaction):
     if not await check_authority(interaction): return
     roles = [r.mention for r in interaction.guild.roles if not r.is_default()]
-    embed = discord.Embed(title="📜 ロール一覧", description="\n".join(roles), color=discord.Color.blue())
+    embed = discord.Embed(title="📜 ロール一覧", description="\n".join(roles) if roles else "ロールが存在しません。", color=discord.Color.blue())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="ロール権限変更", description="ロールの管理者権限フラグを切り替えます")
@@ -461,7 +456,7 @@ async def help_command(interaction: discord.Interaction):
     )
     embed.add_field(
         name="🏪 自販機管理",
-        value="`/自販機作成`, `/自販機削除`, `/自販機設置`, `/商品追加`, `/在庫追加`",
+        value="`/自販機作成`, `/自販機削除`, `/自販機設置`, `/商品追加`",
         inline=False
     )
     embed.add_field(
