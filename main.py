@@ -1,6 +1,11 @@
 from flask import Flask
 from threading import Thread
+import os
+import discord
+from discord.ext import commands
+from discord import app_commands
 
+# --- ダミーWebサーバー設定（Renderエラー回避用） ---
 app = Flask('')
 
 @app.route('/')
@@ -14,19 +19,14 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-keep_alive()  # ダミーサーバー起動
-
-import os
-import discord
-from discord.ext import commands
-from discord import app_commands
+keep_alive()
 
 # --- Botの初期化設定 ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 管理者用チャンネルのID（数字で入力）
+# 管理者用チャンネルのID（※必ず自分のチャンネルIDに変更してください）
 ADMIN_CHANNEL_ID = 123456789012345678  
 
 # --- 承認・拒否ボタンの処理 ---
@@ -40,7 +40,6 @@ class ApproveView(discord.ui.View):
     @discord.ui.button(label="承認（商品を送信）", style=discord.ButtonStyle.green, custom_id="approve_btn")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            # ユーザーのDMに商品を送信（※実際のコードやロールに打ち替え可能）
             await self.user.send(
                 f"【購入完了通知】\n"
                 f"ご購入ありがとうございます！\n"
@@ -70,7 +69,6 @@ class VendingMachineView(discord.ui.View):
 
     @discord.ui.button(label="購入する", style=discord.ButtonStyle.primary, emoji="🛒")
     async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # ボタンを押したらモーダル（入力フォーム）を出す
         await interaction.response.send_modal(PayPayModal(self.item_name, self.price))
 
 # --- PayPayリンク入力用ポップアップ画面 ---
@@ -93,14 +91,12 @@ class PayPayModal(discord.ui.Modal, title="購入手続き"):
             await interaction.response.send_message("管理チャンネルが見つかりません。管理者に連絡してください。", ephemeral=True)
             return
 
-        # 申請者に返信
         await interaction.response.send_message(
             f"✅ 購入申請を受け付けました！管理者の確認後にDMへ商品が届きます。\n"
             f"商品名: {self.item_name} / 価格: {self.price}円", 
             ephemeral=True
         )
 
-        # 管理者チャンネルへ通知
         embed = discord.Embed(title="💳 新しい購入申請", color=discord.Color.blue())
         embed.add_field(name="購入者", value=interaction.user.mention, inline=False)
         embed.add_field(name="商品名", value=self.item_name, inline=True)
@@ -127,14 +123,13 @@ async def create_vending(interaction: discord.Interaction, item_name: str, price
     
     view = VendingMachineView(item_name=item_name, price=price)
     
-    # 設置コマンドを打ったチャンネルに自販機を出力
     await interaction.channel.send(embed=embed, view=view)
     await interaction.response.send_message("自販機パネルを作成しました！", ephemeral=True)
 
 # --- Bot起動イベント ---
 @bot.event
 async def on_ready():
-    await bot.tree.sync() # スラッシュコマンドを同期
+    await bot.tree.sync()
     print(f"Logged in as {bot.user}")
 
 TOKEN = os.getenv("DISCORD_TOKEN")
