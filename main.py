@@ -1,6 +1,7 @@
 from flask import Flask
 from threading import Thread
 import os
+import uuid
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -28,9 +29,24 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 ADMIN_CHANNEL_ID = 123456789012345678  # ※ご自身の管理者チャンネルIDに変更してください
+APPROVED_ROLE_ID = None                # 認証DM送信者のロールIDを保持
 
 # メモリ内データベース
+# vending_machines = { "自販機ID": { "name": "自販機名", "items": { "商品名": {...} } } }
 vending_machines = {}
+
+# オートコンプリート（登録されている自販機を検知して補完）
+async def vending_machine_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+) -> list[app_commands.Choice[str]]:
+    choices = []
+    for machine_id, data in vending_machines.items():
+        name = data["name"]
+        # 入力文字列でフィルタリング
+        if current.lower() in name.lower() or current.lower() in machine_id.lower():
+            choices.append(app_commands.Choice(name=f"{name} ({machine_id[:8]}...)", value=machine_id))
+    return choices[:25]  # Discordの仕様上最大25件
 
 # --- 承認・拒否ボタンの処理 ---
 class ApproveView(discord.ui.View):
@@ -44,14 +60,14 @@ class ApproveView(discord.ui.View):
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             stock_content = "ご購入ありがとうございます！"
-            if self.item_data["stock_type"] == "有限":
-                if len(self.item_data["stocks"]) > 0:
+            if self.item_data.get("stock_type") == "有限":
+                if len(self.item_data.get("stocks", [])) > 0:
                     stock_content = self.item_data["stocks"].pop(0)
                 else:
                     await interaction.response.send_message("⚠️ 在庫切れのため承認できません。", ephemeral=True)
                     return
-            elif self.item_data["stock_type"] == "無限":
-                if len(self.item_data["stocks"]) > 0:
+            elif self.item_data.get("stock_type") == "無限":
+                if len(self.item_data.get("stocks", [])) > 0:
                     stock_content = self.item_data["stocks"][0]
 
             await self.user.send(
@@ -110,10 +126,10 @@ class PayPayModal(discord.ui.Modal, title="購入手続き"):
 
 # --- 商品選択セレクトメニュー ---
 class ItemSelect(discord.ui.Select):
-    def __init__(self, machine_name: str):
-        self.machine_name = machine_name
+    def __init__(self, machine_id: str):
+        self.machine_id = machine_id
         options = []
-        items = vending_machines.get(machine_name, {}).get("items", {})
+        items = vending_machines.get(machine_id, {}).get("items", {})
 
         for item_name, data in items.items():
             desc = f"マネー: {data['price_money']}円 | マネーライト: {data['price_manera']}円"
@@ -131,30 +147,30 @@ class ItemSelect(discord.ui.Select):
             return
 
         selected_item_name = self.values[0]
-        item_data = vending_machines[self.machine_name]["items"][selected_item_name]
+        item_data = vending_machines[self.machine_id]["items"][selected_item_name]
         await interaction.response.send_modal(PayPayModal(item_data))
 
 class ItemSelectView(discord.ui.View):
-    def __init__(self, machine_name: str):
+    def __init__(self, machine_id: str):
         super().__init__(timeout=None)
-        self.add_item(ItemSelect(machine_name))
+        self.add_item(ItemSelect(machine_id))
 
 # --- 自販機パネル（購入ボタン） ---
 class VendingMachineView(discord.ui.View):
-    def __init__(self, machine_name: str):
+    def __init__(self, machine_id: str):
         super().__init__(timeout=None)
-        self.machine_name = machine_name
+        self.machine_id = machine_id
 
     @discord.ui.button(label="購入する", style=discord.ButtonStyle.primary, emoji="🛒")
     async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = ItemSelectView(self.machine_name)
+        view = ItemSelectView(self.machine_id)
         await interaction.response.send_message("購入する商品を選んでください：", view=view, ephemeral=True)
 
 # --- 在庫追加用モーダル ---
 class StockModal(discord.ui.Modal):
-    def __init__(self, machine_name: str, item_name: str, stock_type: str):
+    def __init__(self, machine_id: str, item_name: str, stock_type: str):
         super().__init__(title=f"<{stock_type}>在庫内容")
-        self.machine_name = machine_name
+        self.machine_id = machine_id
         self.item_name = item_name
         self.stock_type = stock_type
 
@@ -168,7 +184,7 @@ class StockModal(discord.ui.Modal):
         self.add_item(self.stock_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        item_data = vending_machines[self.machine_name]["items"][self.item_name]
+        item_data = vending_machines[self.machine_id]["items"][self.item_name]
         item_data["stock_type"] = self.stock_type
         item_data["stocks"].append(self.stock_input.value)
 
@@ -179,12 +195,12 @@ class StockModal(discord.ui.Modal):
 
 # --- 在庫追加用の商品選択ドロップダウン ---
 class StockItemSelect(discord.ui.Select):
-    def __init__(self, machine_name: str, stock_type: str):
-        self.machine_name = machine_name
+    def __init__(self, machine_id: str, stock_type: str):
+        self.machine_id = machine_id
         self.stock_type = stock_type
 
         options = []
-        items = vending_machines.get(machine_name, {}).get("items", {})
+        items = vending_machines.get(machine_id, {}).get("items", {})
         for item_name in items.keys():
             options.append(discord.SelectOption(label=item_name, value=item_name))
 
@@ -192,32 +208,69 @@ class StockItemSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         selected_item = self.values[0]
-        await interaction.response.send_modal(StockModal(self.machine_name, selected_item, self.stock_type))
+        await interaction.response.send_modal(StockModal(self.machine_id, selected_item, self.stock_type))
 
 class StockItemSelectView(discord.ui.View):
-    def __init__(self, machine_name: str, stock_type: str):
+    def __init__(self, machine_id: str, stock_type: str):
         super().__init__(timeout=None)
-        self.add_item(StockItemSelect(machine_name, stock_type))
+        self.add_item(StockItemSelect(machine_id, stock_type))
 
-# --- スラッシュコマンド ---
+# --- 各種スラッシュコマンド ---
 
-@bot.tree.command(name="自販機作成", description="指定した名前で自販機パネルを作成します")
+@bot.tree.command(name="自販機作成", description="新しい自販機を作成し、固有のIDを発行します")
 async def create_vending_machine(interaction: discord.Interaction, name: str):
-    if name not in vending_machines:
-        vending_machines[name] = {"items": {}}
+    machine_id = str(uuid.uuid4())
+    vending_machines[machine_id] = {
+        "name": name,
+        "items": {}
+    }
+
+    dm_setting_msg = ""
+    if APPROVED_ROLE_ID is None:
+        dm_setting_msg = "\n**承認DMを設定してください。**"
+
+    message = (
+        f"自販機 **{name}** を作成しました。\n"
+        f"**自販機ID:** `{machine_id}`"
+        f"{dm_setting_msg}"
+    )
+
+    await interaction.response.send_message(message, ephemeral=True)
+
+@bot.tree.command(name="自販機設置", description="指定した自販機の購入パネルをチャンネルに設置します")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+@app_commands.describe(
+    vending_machine_id="設置する自販機を選択",
+    panel_title="パネルタイトル",
+    panel_description="パネル説明文"
+)
+async def setup_vending_machine(
+    interaction: discord.Interaction, 
+    vending_machine_id: str, 
+    panel_title: str = None, 
+    panel_description: str = None
+):
+    if vending_machine_id not in vending_machines:
+        await interaction.response.send_message("指定された自販機IDが見つかりません。", ephemeral=True)
+        return
+
+    machine_data = vending_machines[vending_machine_id]
+    title = panel_title if panel_title else f"🏪 【自販機】{machine_data['name']}"
+    desc = panel_description if panel_description else "下の「購入する」ボタンを押して商品を選択してください。"
 
     embed = discord.Embed(
-        title=f"🏪 【自販機】{name}",
-        description="下の「購入する」ボタンを押して商品を選択してください。",
+        title=title,
+        description=desc,
         color=discord.Color.blue()
     )
-    view = VendingMachineView(machine_name=name)
+    view = VendingMachineView(machine_id=vending_machine_id)
     await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message(f"自販機『{name}』パネルを作成しました！", ephemeral=True)
+    await interaction.response.send_message(f"自販機『{machine_data['name']}』パネルを設置しました！", ephemeral=True)
 
 @bot.tree.command(name="商品追加", description="自販機に新しい商品を追加します")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 @app_commands.describe(
-    vending_machine_id="対象の自販機名",
+    vending_machine_id="対象の自販機を選択",
     name="商品名",
     price_money="マネー価格",
     price_manera="マネーライト価格",
@@ -234,7 +287,8 @@ async def add_item(
     emoji: str = None
 ):
     if vending_machine_id not in vending_machines:
-        vending_machines[vending_machine_id] = {"items": {}}
+        await interaction.response.send_message("指定された自販機が見つかりません。", ephemeral=True)
+        return
 
     vending_machines[vending_machine_id]["items"][name] = {
         "name": name,
@@ -245,9 +299,11 @@ async def add_item(
         "stock_type": "有限",
         "stocks": []
     }
-    await interaction.response.send_message(f"✅ 自販機『{vending_machine_id}』に商品『{name}』を追加しました！", ephemeral=True)
+    machine_name = vending_machines[vending_machine_id]["name"]
+    await interaction.response.send_message(f"✅ 自販機『{machine_name}』に商品『{name}』を追加しました！", ephemeral=True)
 
 @bot.tree.command(name="在庫追加", description="自販機の商品に在庫を登録します")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 @app_commands.choices(stock_type=[
     app_commands.Choice(name="有限", value="有限"),
     app_commands.Choice(name="無限", value="無限")
@@ -262,6 +318,8 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str, s
 
 @bot.tree.command(name="認証dm送信者", description="承認時の自動DM送信者の権限・設定を行います")
 async def setup_dm_sender(interaction: discord.Interaction, role: discord.Role):
+    global APPROVED_ROLE_ID
+    APPROVED_ROLE_ID = role.id
     await interaction.response.send_message(f"✅ DM送信・承認権限ロールを {role.mention} に設定しました！", ephemeral=True)
 
 # --- Bot起動イベント ---
