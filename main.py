@@ -1,32 +1,14 @@
-from flask import Flask
-from threading import Thread
 import os
 import discord
 from discord.ext import commands
 from discord import app_commands
-
-# --- ダミーWebサーバー設定（Renderエラー回避用） ---
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Vender Bot is alive!"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-keep_alive()
 
 # --- Botの初期化設定 ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 管理者用チャンネルのID（※必ず自分のチャンネルIDに変更してください）
+# 管理者用チャンネルのID（※ご自身のチャンネルID数字に変更してください）
 ADMIN_CHANNEL_ID = 123456789012345678  
 
 # --- 承認・拒否ボタンの処理 ---
