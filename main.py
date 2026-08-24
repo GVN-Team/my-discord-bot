@@ -1,101 +1,123 @@
 import os
 import discord
-from discord import app_commands
 from discord.ext import commands
+from discord import app_commands
 
-# インテントの設定
+# --- Botの初期化設定 ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 簡易的な在庫とポイント管理
-user_balances = {}  # ユーザーの所持ポイント
-stock_list = [
-    "ITEM-CODE-AAAA-1111",
-    "ITEM-CODE-BBBB-2222",
-    "ITEM-CODE-CCCC-3333"
-]
+# 管理者用チャンネルのID（数字で入力）
+ADMIN_CHANNEL_ID = 123456789012345678  
 
-ITEM_PRICE = 100  # 商品の価格（ポイント）
-
-
-# 購入ボタンの処理
-class VendingMachineView(discord.ui.View):
-    def __init__(self):
+# --- 承認・拒否ボタンの処理 ---
+class ApproveView(discord.ui.View):
+    def __init__(self, user: discord.User, item_name: str, paypay_url: str):
         super().__init__(timeout=None)
+        self.user = user
+        self.item_name = item_name
+        self.paypay_url = paypay_url
 
-    @discord.ui.button(label="商品を購入する (100pt)", style=discord.ButtonStyle.green, custom_id="buy_button")
-    async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_id = interaction.user.id
-        balance = user_balances.get(user_id, 0)
-
-        # 所持ポイントチェック
-        if balance < ITEM_PRICE:
-            await interaction.response.send_message(
-                f"❌ ポイントが足りません！（所持: {balance}pt / 必要: {ITEM_PRICE}pt）", 
-                ephemeral=True
+    @discord.ui.button(label="承認（商品を送信）", style=discord.ButtonStyle.green, custom_id="approve_btn")
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            # ユーザーのDMに商品を送信（※実際のコードやロールに打ち替え可能）
+            await self.user.send(
+                f"【購入完了通知】\n"
+                f"ご購入ありがとうございます！\n"
+                f"商品名: **{self.item_name}**\n"
+                f"商品コード: `EXAMPLE-1234-ABCD`"
             )
+            await interaction.response.send_message(f"✅ {self.user.mention} への商品送信が完了しました！", ephemeral=True)
+            self.stop()
+        except discord.Forbidden:
+            await interaction.response.send_message("⚠️ ユーザーのDMが閉じられているため送信できませんでした。", ephemeral=True)
+
+    @discord.ui.button(label="拒否", style=discord.ButtonStyle.red, custom_id="deny_btn")
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await self.user.send(f"【購入キャンセル】\n`{self.item_name}` の決済が確認できなかったため、購入申請が拒否されました。")
+        except discord.Forbidden:
+            pass
+        await interaction.response.send_message(f"❌ {self.user.mention} の申請を拒否しました。", ephemeral=True)
+        self.stop()
+
+# --- 自販機パネルに表示される「購入」ボタン ---
+class VendingMachineView(discord.ui.View):
+    def __init__(self, item_name: str, price: int):
+        super().__init__(timeout=None)
+        self.item_name = item_name
+        self.price = price
+
+    @discord.ui.button(label="購入する", style=discord.ButtonStyle.primary, emoji="🛒")
+    async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # ボタンを押したらモーダル（入力フォーム）を出す
+        await interaction.response.send_modal(PayPayModal(self.item_name, self.price))
+
+# --- PayPayリンク入力用ポップアップ画面 ---
+class PayPayModal(discord.ui.Modal, title="購入手続き"):
+    paypay_url = discord.ui.TextInput(
+        label="PayPay送金リンク",
+        placeholder="https://paypay.me/...",
+        required=True,
+        max_length=100
+    )
+
+    def __init__(self, item_name: str, price: int):
+        super().__init__()
+        self.item_name = item_name
+        self.price = price
+
+    async def on_submit(self, interaction: discord.Interaction):
+        admin_channel = interaction.client.get_channel(ADMIN_CHANNEL_ID)
+        if not admin_channel:
+            await interaction.response.send_message("管理チャンネルが見つかりません。管理者に連絡してください。", ephemeral=True)
             return
 
-        # 在庫チェック
-        if not stock_list:
-            await interaction.response.send_message("❌ 申し訳ありません。現在売り切れです。", ephemeral=True)
-            return
-
-        # 決済処理と商品渡し
-        user_balances[user_id] -= ITEM_PRICE
-        item = stock_list.pop(0)
-
+        # 申請者に返信
         await interaction.response.send_message(
-            f"🎉 ご購入ありがとうございます！\n**【商品コード】**:\n`{item}`\n(残高: {user_balances[user_id]}pt)", 
+            f"✅ 購入申請を受け付けました！管理者の確認後にDMへ商品が届きます。\n"
+            f"商品名: {self.item_name} / 価格: {self.price}円", 
             ephemeral=True
         )
 
+        # 管理者チャンネルへ通知
+        embed = discord.Embed(title="💳 新しい購入申請", color=discord.Color.blue())
+        embed.add_field(name="購入者", value=interaction.user.mention, inline=False)
+        embed.add_field(name="商品名", value=self.item_name, inline=True)
+        embed.add_field(name="金額", value=f"{self.price}円", inline=True)
+        embed.add_field(name="PayPayリンク", value=self.paypay_url.value, inline=False)
 
+        view = ApproveView(user=interaction.user, item_name=self.item_name, paypay_url=self.paypay_url.value)
+        await admin_channel.send(embed=embed, view=view)
+
+# --- スラッシュコマンド（自販機の作成） ---
+@bot.tree.command(name="create_vending", description="チャンネルに商品購入用の自販機パネルを作成します")
+@app_commands.describe(
+    item_name="販売する商品の名前を入力してください（例: VIPロール）",
+    price="商品の価格（数字のみ）を入力してください（例: 500）",
+    description="パネルに表示する商品の説明テキストを入力してください"
+)
+async def create_vending(interaction: discord.Interaction, item_name: str, price: int, description: str):
+    embed = discord.Embed(
+        title=f"🏪 【販売】{item_name}",
+        description=f"{description}\n\n**価格:** `{price}円`",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="下の「購入する」ボタンを押してPayPayリンクを送信してください")
+    
+    view = VendingMachineView(item_name=item_name, price=price)
+    
+    # 設置コマンドを打ったチャンネルに自販機を出力
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("自販機パネルを作成しました！", ephemeral=True)
+
+# --- Bot起動イベント ---
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user.name}")
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        print(e)
+    await bot.tree.sync() # スラッシュコマンドを同期
+    print(f"Logged in as {bot.user}")
 
-
-# 自販機設置コマンド (/vending)
-@bot.tree.command(name="vending", description="自販機パネルを設置します（管理者用）")
-@app_commands.checks.has_permissions(administrator=True)
-async def vending(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🤖 自動販売機",
-        description=f"下のボタンを押して商品を購入できます。\n\n**価格**: {ITEM_PRICE}pt\n**現在の在庫数**: {len(stock_list)}個",
-        color=discord.Color.blue()
-    )
-    await interaction.channel.send(embed=embed, view=VendingMachineView())
-    await interaction.response.send_message("自販機パネルを設置しました！", ephemeral=True)
-
-
-# ポイント付与コマンド (/add_points)
-@bot.tree.command(name="add_points", description="指定ユーザーにポイントを付与します")
-@app_commands.checks.has_permissions(administrator=True)
-async def add_points(interaction: discord.Interaction, target: discord.User, amount: int):
-    user_balances[target.id] = user_balances.get(target.id, 0) + amount
-    await interaction.response.send_message(
-        f"✅ {target.mention} に {amount}pt を付与しました。（現在: {user_balances[target.id]}pt）"
-    )
-
-
-# 残高確認コマンド (/balance)
-@bot.tree.command(name="balance", description="自分の所持ポイントを確認します")
-async def balance(interaction: discord.Interaction):
-    bal = user_balances.get(interaction.user.id, 0)
-    await interaction.response.send_message(f"💰 あなたの所持ポイント: **{bal}pt**", ephemeral=True)
-
-
-# 環境変数「DISCORD_TOKEN」からトークンを読み込んで起動
-TOKEN = os.getenv('DISCORD_TOKEN')
-
-if not TOKEN:
-    print("エラー: DISCORD_TOKEN が設定されていません。")
-else:
-    bot.run(TOKEN)
+TOKEN = os.getenv("DISCORD_TOKEN")
+bot.run(TOKEN)
