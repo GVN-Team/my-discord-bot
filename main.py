@@ -7,9 +7,8 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-# --- ダミーWebサーバー ＆ Web認証用サーバー ---
+# --- Web認証 ＆ ダミーWebサーバー ---
 app = Flask('')
-
 verification_tokens = {}
 
 HTML_TEMPLATE = """
@@ -81,14 +80,30 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-ADMIN_CHANNEL_ID = 123456789012345678  # ※ご自身の管理者チャンネルIDに変更してください
+ADMIN_CHANNEL_ID = 123456789012345678  # ご自身の管理者チャンネルIDに変更してください
 APPROVED_ROLE_ID = None
 
-# --- 許可されたサーバーIDリスト（初期状態） ---
-# 最初にBotを入れておきたいサーバーIDをここに書いておくことも可能です
-allowed_guild_ids = set()
+# 🔒 コマンド実行を許可するユーザーID（あなたや共同管理者のDiscordユーザーIDを入れてください）
+AUTHORIZED_USER_IDS = [
+    # 例: 123456789012345678, 987654321098765432
+]
 
+# データベース変数の初期化
 vending_machines = {}
+coupons = {}
+
+# 権限チェック関数
+async def check_authority(interaction: discord.Interaction) -> bool:
+    app_info = await bot.application_info()
+    owner_id = app_info.owner.id
+    
+    # Bot作成者または AUTHORIZED_USER_IDS に含まれるユーザーなら許可
+    if interaction.user.id == owner_id or interaction.user.id in AUTHORIZED_USER_IDS:
+        return True
+    
+    # 許可されていないユーザーの場合
+    await interaction.response.send_message("❌ 権利がないため実行できませんでした。", ephemeral=True)
+    return False
 
 # 役割付与処理
 async def assign_role(guild_id: int, user_id: int, role_id: int):
@@ -103,7 +118,7 @@ async def assign_role(guild_id: int, user_id: int, role_id: int):
         except Exception as e:
             print(f"ロール付与エラー: {e}")
 
-# オートコンプリート
+# 自販機オートコンプリート
 async def vending_machine_autocomplete(
     interaction: discord.Interaction,
     current: str
@@ -258,85 +273,40 @@ class VerifyView(discord.ui.View):
             ephemeral=True
         )
 
-# --- サーバー許可指定コマンド ---
-@bot.tree.command(name="サーバー許可", description="[Bot作成者専用] Botの使用を許可するサーバーを指定・管理します")
-@app_commands.choices(操作=[
-    app_commands.Choice(name="追加", value="add"),
-    app_commands.Choice(name="削除", value="remove"),
-    app_commands.Choice(name="現在のサーバーを追加", value="add_current"),
-    app_commands.Choice(name="一覧表示", value="list")
-])
-async def manage_allowed_guilds(
-    interaction: discord.Interaction, 
-    操作: str, 
-    サーバーid: str = None
-):
-    # 作成者チェック
-    app_info = await bot.application_info()
-    if interaction.user.id != app_info.owner.id:
-        await interaction.response.send_message("❌ このコマンドはBotの作成者のみ実行できます。", ephemeral=True)
-        return
+# --- 自販機削除確認ビュー ---
+class DeleteConfirmView(discord.ui.View):
+    def __init__(self, machine_id: str, machine_name: str):
+        super().__init__(timeout=60)
+        self.machine_id = machine_id
+        self.machine_name = machine_name
 
-    if 操作 == "add_current":
-        target_id = interaction.guild_id
-        allowed_guild_ids.add(target_id)
-        await interaction.response.send_message(f"✅ 現在のサーバー (`{target_id}`) を許可リストに追加しました！", ephemeral=True)
+    @discord.ui.button(label="削除する", style=discord.ButtonStyle.red)
+    async def confirm_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.machine_id in vending_machines:
+            del vending_machines[self.machine_id]
 
-    elif 操作 == "add":
-        if not サーバーid or not サーバーid.isdigit():
-            await interaction.response.send_message("⚠️ 正しいサーバーID（数字）を入力してください。", ephemeral=True)
-            return
-        target_id = int(サーバーid)
-        allowed_guild_ids.add(target_id)
-        await interaction.response.send_message(f"✅ サーバーID `{target_id}` を許可リストに追加しました！", ephemeral=True)
+        embed = discord.Embed(
+            title="# 削除完了",
+            description=f"自販機「{self.machine_name}」を削除しました。",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
 
-    elif 操作 == "remove":
-        if not サーバーid or not サーバーid.isdigit():
-            await interaction.response.send_message("⚠️ 正しいサーバーID（数字）を入力してください。", ephemeral=True)
-            return
-        target_id = int(サーバーid)
-        if target_id in allowed_guild_ids:
-            allowed_guild_ids.remove(target_id)
-            # もし現在そのサーバーに参加中なら即退出させる
-            guild = bot.get_guild(target_id)
-            if guild:
-                await guild.leave()
-            await interaction.response.send_message(f"❌ サーバーID `{target_id}` を許可リストから削除し、退出処理を行いました。", ephemeral=True)
-        else:
-            await interaction.response.send_message("⚠️ そのサーバーIDはリストに存在しません。", ephemeral=True)
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
+    async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="# キャンセル",
+            description="自販機削除をキャンセルしました。",
+            color=discord.Color.blue()
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
 
-    elif 操作 == "list":
-        if not allowed_guild_ids:
-            await interaction.response.send_message("📋 許可されているサーバーはありません。（制限なし、または未登録）", ephemeral=True)
-        else:
-            guild_list_str = "\n".join([f"・`{gid}` ({bot.get_guild(gid).name if bot.get_guild(gid) else '未参加'})" for gid in allowed_guild_ids])
-            await interaction.response.send_message(f"📋 **許可されているサーバー一覧:**\n{guild_list_str}", ephemeral=True)
-
-# --- その他のコマンド ---
-
-@bot.tree.command(name="認証パネル設置", description="Webパネル認証のメッセージを設置します")
-@app_commands.describe(
-    role="認証成功時に付与するロール",
-    title="パネルのタイトル",
-    description="パネルの説明文"
-)
-async def setup_verify_panel(
-    interaction: discord.Interaction, 
-    role: discord.Role, 
-    title: str = "🔒 サーバー参加認証", 
-    description: str = "下の「認証する」ボタンを押してWebページで認証を完了させてください。"
-):
-    embed = discord.Embed(
-        title=title,
-        description=description,
-        color=discord.Color.green()
-    )
-    view = VerifyView(role_id=role.id)
-    await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message("✅ 認証パネルを設置しました！", ephemeral=True)
+# --- スラッシュコマンド（権限制限あり） ---
 
 @bot.tree.command(name="自販機作成", description="新しい自販機を作成し、固有のIDを発行します")
 async def create_vending_machine(interaction: discord.Interaction, name: str):
+    if not await check_authority(interaction): return
+
     machine_id = str(uuid.uuid4())
     vending_machines[machine_id] = {
         "name": name,
@@ -352,8 +322,26 @@ async def create_vending_machine(interaction: discord.Interaction, name: str):
         f"**自販機ID:** `{machine_id}`"
         f"{dm_setting_msg}"
     )
-
     await interaction.response.send_message(message, ephemeral=True)
+
+@bot.tree.command(name="自販機削除", description="指定した自販機を削除します")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+async def delete_vending_machine(interaction: discord.Interaction, vending_machine_id: str):
+    if not await check_authority(interaction): return
+
+    if vending_machine_id not in vending_machines:
+        await interaction.response.send_message("⚠️ 指定された自販機が見つかりません。", ephemeral=True)
+        return
+
+    machine_name = vending_machines[vending_machine_id]["name"]
+    
+    embed = discord.Embed(
+        title="# 自販機削除確認",
+        description=f"本当に自販機「{machine_name}」を削除しますか？\n\nこの操作は取り消せません。\nすべての商品と在庫データも削除されます。",
+        color=discord.Color.red()
+    )
+    view = DeleteConfirmView(vending_machine_id, machine_name)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 @bot.tree.command(name="自販機設置", description="指定した自販機の購入パネルを設置します")
 @app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
@@ -363,6 +351,8 @@ async def setup_vending_machine(
     panel_title: str = None, 
     panel_description: str = None
 ):
+    if not await check_authority(interaction): return
+
     if vending_machine_id not in vending_machines:
         await interaction.response.send_message("指定された自販機IDが見つかりません。", ephemeral=True)
         return
@@ -387,6 +377,8 @@ async def add_item(
     description: str = "", 
     emoji: str = None
 ):
+    if not await check_authority(interaction): return
+
     if vending_machine_id not in vending_machines:
         await interaction.response.send_message("指定された自販機が見つかりません。", ephemeral=True)
         return
@@ -410,6 +402,8 @@ async def add_item(
     app_commands.Choice(name="無限", value="無限")
 ])
 async def add_stock(interaction: discord.Interaction, vending_machine_id: str, stock_type: str):
+    if not await check_authority(interaction): return
+
     if vending_machine_id not in vending_machines or not vending_machines[vending_machine_id]["items"]:
         await interaction.response.send_message("指定された自販機または商品が存在しません。", ephemeral=True)
         return
@@ -453,35 +447,83 @@ class StockItemSelectView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(StockItemSelect(machine_id, stock_type))
 
+# --- クーポンコマンド ---
+
+@bot.tree.command(name="クーポン作成", description="割引クーポンを作成します")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+async def create_coupon(
+    interaction: discord.Interaction, 
+    vending_machine_id: str, 
+    coupon_code: str, 
+    discount: int, 
+    count: int
+):
+    if not await check_authority(interaction): return
+
+    if vending_machine_id not in vending_machines:
+        await interaction.response.send_message("⚠️ 指定された自販機が見つかりません。", ephemeral=True)
+        return
+
+    coupons[coupon_code] = {
+        "vending_machine_id": vending_machine_id,
+        "discount": discount,
+        "count": count
+    }
+
+    await interaction.response.send_message(f"クーポン`{coupon_code}`を作成しました。", ephemeral=True)
+
+@bot.tree.command(name="クーポン削除", description="指定したクーポンを削除します")
+async def delete_coupon(interaction: discord.Interaction, coupon_code: str):
+    if not await check_authority(interaction): return
+
+    if coupon_code in coupons:
+        del coupons[coupon_code]
+        await interaction.response.send_message(f"✅クーポン`{coupon_code}`を削除しました。", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"❌クーポン`{coupon_code}`は存在しません。", ephemeral=True)
+
+@bot.tree.command(name="クーポン一覧", description="登録されているクーポンの一覧を表示します")
+async def list_coupons(interaction: discord.Interaction):
+    if not await check_authority(interaction): return
+
+    if not coupons:
+        await interaction.response.send_message("クーポンがありません。", ephemeral=True)
+        return
+
+    res_text = ""
+    for code, data in coupons.items():
+        v_name = vending_machines.get(data["vending_machine_id"], {}).get("name", "不明な自販機")
+        res_text += f"コード:`{code}`\n割引:{data['discount']}円\n自販機:{v_name}\n\n"
+
+    await interaction.response.send_message(res_text.strip(), ephemeral=True)
+
+@bot.tree.command(name="認証パネル設置", description="Webパネル認証のメッセージを設置します")
+@app_commands.describe(role="認証成功時に付与するロール", title="パネルのタイトル", description="パネルの説明文")
+async def setup_verify_panel(
+    interaction: discord.Interaction, 
+    role: discord.Role, 
+    title: str = "🔒 サーバー参加認証", 
+    description: str = "下の「認証する」ボタンを押してWebページで認証を完了させてください。"
+):
+    if not await check_authority(interaction): return
+
+    embed = discord.Embed(title=title, description=description, color=discord.Color.green())
+    view = VerifyView(role_id=role.id)
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("✅ 認証パネルを設置しました！", ephemeral=True)
+
 @bot.tree.command(name="認証dm送信者", description="承認時の自動DM送信者の権限・設定を行います")
 async def setup_dm_sender(interaction: discord.Interaction, role: discord.Role):
+    if not await check_authority(interaction): return
+
     global APPROVED_ROLE_ID
     APPROVED_ROLE_ID = role.id
     await interaction.response.send_message(f"✅ DM送信・承認権限ロールを {role.mention} に設定しました！", ephemeral=True)
-
-# --- 未許可サーバーからの自動脱退処理 ---
-@bot.event
-async def on_guild_join(guild: discord.Guild):
-    # リストにIDが登録されている場合のみチェックを実行（空の場合は誰でも追加可能）
-    if allowed_guild_ids and guild.id not in allowed_guild_ids:
-        print(f"未許可サーバー ({guild.name} / ID: {guild.id}) に追加されたため脱退します。")
-        for channel in guild.text_channels:
-            if channel.permissions_for(guild.me).send_messages:
-                await channel.send("⚠️ このBotは許可された特定のサーバー専用です。自動脱退します。")
-                break
-        await guild.leave()
 
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     print(f"Logged in as {bot.user}")
-    
-    # 起動時にも未許可サーバーをチェックして退出
-    if allowed_guild_ids:
-        for guild in bot.guilds:
-            if guild.id not in allowed_guild_ids:
-                print(f"起動時チェック: 未許可サーバー ({guild.name}) から脱退します。")
-                await guild.leave()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 bot.run(TOKEN)
