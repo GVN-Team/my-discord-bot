@@ -80,15 +80,12 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-ADMIN_CHANNEL_ID = 123456789012345678  # ご自身の管理者チャンネルIDに変更してください
+ADMIN_CHANNEL_ID = 123456789012345678  # ※ご自身の管理者チャンネルIDに変更してください
 APPROVED_ROLE_ID = None
 
-# 🔒 コマンド実行を許可するユーザーID（あなたや共同管理者のDiscordユーザーIDを入れてください）
-AUTHORIZED_USER_IDS = [
-    # 例: 123456789012345678, 987654321098765432
-]
+# 🔒 コマンド実行を許可するユーザーID（許可したいユーザーのDiscord IDを入れてください）
+AUTHORIZED_USER_IDS = []
 
-# データベース変数の初期化
 vending_machines = {}
 coupons = {}
 
@@ -97,11 +94,9 @@ async def check_authority(interaction: discord.Interaction) -> bool:
     app_info = await bot.application_info()
     owner_id = app_info.owner.id
     
-    # Bot作成者または AUTHORIZED_USER_IDS に含まれるユーザーなら許可
     if interaction.user.id == owner_id or interaction.user.id in AUTHORIZED_USER_IDS:
         return True
     
-    # 許可されていないユーザーの場合
     await interaction.response.send_message("❌ 権利がないため実行できませんでした。", ephemeral=True)
     return False
 
@@ -273,7 +268,7 @@ class VerifyView(discord.ui.View):
             ephemeral=True
         )
 
-# --- 自販機削除確認ビュー ---
+# --- 画像再現：自販機削除確認ビュー ---
 class DeleteConfirmView(discord.ui.View):
     def __init__(self, machine_id: str, machine_name: str):
         super().__init__(timeout=60)
@@ -286,22 +281,24 @@ class DeleteConfirmView(discord.ui.View):
             del vending_machines[self.machine_id]
 
         embed = discord.Embed(
-            title="# 削除完了",
+            title="削除完了",
             description=f"自販機「{self.machine_name}」を削除しました。",
             color=discord.Color.green()
         )
-        await interaction.response.edit_message(embed=embed, view=None)
+        embed.set_footer(text="Developer @Alpha_shop.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
     async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
-            title="# キャンセル",
+            title="キャンセル",
             description="自販機削除をキャンセルしました。",
             color=discord.Color.blue()
         )
-        await interaction.response.edit_message(embed=embed, view=None)
+        embed.set_footer(text="Developer @Alpha_shop.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# --- スラッシュコマンド（権限制限あり） ---
+# --- スラッシュコマンド（各種指定） ---
 
 @bot.tree.command(name="自販機作成", description="新しい自販機を作成し、固有のIDを発行します")
 async def create_vending_machine(interaction: discord.Interaction, name: str):
@@ -336,10 +333,11 @@ async def delete_vending_machine(interaction: discord.Interaction, vending_machi
     machine_name = vending_machines[vending_machine_id]["name"]
     
     embed = discord.Embed(
-        title="# 自販機削除確認",
-        description=f"本当に自販機「{machine_name}」を削除しますか？\n\nこの操作は取り消せません。\nすべての商品と在庫データも削除されます。",
+        title="自販機削除確認",
+        description=f"本当に自販機「{machine_name}」を削除しますか？\n\n**この操作は取り消せません。**\n**すべての商品と在庫データも削除されます。**",
         color=discord.Color.red()
     )
+    embed.set_footer(text="Developer @Alpha_shop.")
     view = DeleteConfirmView(vending_machine_id, machine_name)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
