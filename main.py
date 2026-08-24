@@ -13,7 +13,8 @@ def home():
     return "Vender Bot is alive!"
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     t = Thread(target=run)
@@ -29,7 +30,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 ADMIN_CHANNEL_ID = 123456789012345678  # ※ご自身の管理者チャンネルIDに変更してください
 
 # メモリ内データベース
-# vending_machines = { "自販機名": { "items": { "商品名": {"price_money": int, "price_manera": int, "description": str, "emoji": str, "stock_type": str, "stocks": []} } } }
 vending_machines = {}
 
 # --- 承認・拒否ボタンの処理 ---
@@ -43,13 +43,12 @@ class ApproveView(discord.ui.View):
     @discord.ui.button(label="承認（商品を送信）", style=discord.ButtonStyle.green, custom_id="approve_btn")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            # 在庫から商品データを取り出し
-            stock_content = "購入ありがとうございます！"
+            stock_content = "ご購入ありがとうございます！"
             if self.item_data["stock_type"] == "有限":
                 if len(self.item_data["stocks"]) > 0:
                     stock_content = self.item_data["stocks"].pop(0)
                 else:
-                    await interaction.response.send_message("⚠️ 在庫が切れのため承認できません。", ephemeral=True)
+                    await interaction.response.send_message("⚠️ 在庫切れのため承認できません。", ephemeral=True)
                     return
             elif self.item_data["stock_type"] == "無限":
                 if len(self.item_data["stocks"]) > 0:
@@ -148,7 +147,6 @@ class VendingMachineView(discord.ui.View):
 
     @discord.ui.button(label="購入する", style=discord.ButtonStyle.primary, emoji="🛒")
     async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 押すと一時メッセージ(ephemeral)で選択メニューを表示
         view = ItemSelectView(self.machine_name)
         await interaction.response.send_message("購入する商品を選んでください：", view=view, ephemeral=True)
 
@@ -201,7 +199,7 @@ class StockItemSelectView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(StockItemSelect(machine_name, stock_type))
 
-# --- 各種スラッシュコマンド ---
+# --- スラッシュコマンド ---
 
 @bot.tree.command(name="自販機作成", description="指定した名前で自販機パネルを作成します")
 async def create_vending_machine(interaction: discord.Interaction, name: str):
