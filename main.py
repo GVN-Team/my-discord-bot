@@ -4,12 +4,31 @@ import random
 import string
 import datetime
 import asyncio
+from threading import Thread
+from flask import Flask
 import discord
 import aiohttp
 from discord.ext import commands
 from discord import app_commands
 
-# --- Bot初期化 ---
+# ================= Flask (Web Service タイムアウト対策) =================
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run_flask():
+    # Renderの標準ポート8080でWebサーバーを起動
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+# ================= Bot 初期化 =================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -39,7 +58,7 @@ async def check_authority(interaction: discord.Interaction) -> bool:
     await interaction.response.send_message("❌ 権利がないため実行できませんでした。", ephemeral=True)
     return False
 
-# --- 自販機選択時のオートコンプリート（名前のみ表示） ---
+# --- 自販機選択時のオートコンプリート ---
 async def vending_machine_autocomplete(
     interaction: discord.Interaction,
     current: str
@@ -271,7 +290,6 @@ async def create_backup(interaction: discord.Interaction):
     now_str = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     backup_key = generate_key(8)
     
-    # データ収集
     await asyncio.sleep(1)
     embed.description = "⏳ ロール情報を作成中... (30%)"
     await interaction.edit_original_response(embed=embed)
@@ -297,7 +315,6 @@ async def create_backup(interaction: discord.Interaction):
         "created_at": now_str
     }
 
-    # 完了Embedの構築
     result_embed = discord.Embed(
         title="完了",
         description="✅ **バックアップ完了（音声除外）**",
@@ -314,7 +331,6 @@ async def create_backup(interaction: discord.Interaction):
 
     await interaction.edit_original_response(embed=result_embed)
 
-    # DMへ送信
     try:
         await interaction.user.send(embed=result_embed)
     except discord.Forbidden:
@@ -331,7 +347,6 @@ async def load_backup(interaction: discord.Interaction, key: str):
     await interaction.response.send_message(f"🔄 キー `{key}` から構成データをロード中...", ephemeral=True)
     await asyncio.sleep(2)
     await interaction.followup.send(f"✅ キー `{key}` のロードが完了しました！", ephemeral=True)
-
 
 # --- 承認DM設定・削除 ---
 @bot.tree.command(name="承認dm設定", description="サーバー管理者（オーナー）のDMへ購入通知を設定します")
@@ -350,7 +365,6 @@ async def remove_dm_sender(interaction: discord.Interaction):
     global ADMIN_DM_TARGET_ID
     ADMIN_DM_TARGET_ID = None
     await interaction.response.send_message("✅ 承認DM設定を削除・解除しました。", ephemeral=True)
-
 
 # --- 自販機関連 ---
 @bot.tree.command(name="自販機作成", description="新しい自販機を作成します")
@@ -451,5 +465,7 @@ async def on_ready():
     await bot.tree.sync()
     print(f"Logged in as {bot.user}")
 
+# --- アプリ起動（Flaskを並行起動してからBot起動） ---
+keep_alive()
 TOKEN = os.getenv("DISCORD_TOKEN")
 bot.run(TOKEN)
