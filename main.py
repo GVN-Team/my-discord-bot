@@ -15,13 +15,13 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# グローバル設定
-APPROVED_ROLE_ID = None  # 承認DMロールID
+# グローバルデータ保持用
+APPROVED_ROLE_ID = None      # 承認DMロールID
 AUTHORIZED_USER_IDS = set()  # Bot操作権限ユーザー
-vending_machines = {}
+vending_machines = {}        # { machine_name: {"name": name, "items": {}} }
 coupons = {}
 
-# 権限チェック関数
+# --- 権限チェック関数 ---
 async def check_authority(interaction: discord.Interaction) -> bool:
     app_info = await bot.application_info()
     owner_id = app_info.owner.id
@@ -32,21 +32,19 @@ async def check_authority(interaction: discord.Interaction) -> bool:
     await interaction.response.send_message("❌ 権利がないため実行できませんでした。", ephemeral=True)
     return False
 
-# 自販機オートコンプリート
-async def vending_machine_autocomplete(
+# --- 自販機選択時のオートコンプリート（名前のみ表示） ---
+async def vending_machine_name_autocomplete(
     interaction: discord.Interaction,
     current: str
 ) -> list[app_commands.Choice[str]]:
     choices = []
-    for machine_id, data in vending_machines.items():
-        name = data["name"]
-        if current.lower() in name.lower() or current.lower() in machine_id.lower():
-            choices.append(app_commands.Choice(name=f"{name} ({machine_id[:8]}...)", value=machine_id))
+    for name in vending_machines.keys():
+        if current.lower() in name.lower():
+            choices.append(app_commands.Choice(name=name, value=name))
     return choices[:25]
 
 # --- PayPay リンク自動取得 & 検証処理 ---
 async def fetch_paypay_info(paypay_url: str):
-    """PayPayリンクから金額と状態を取得する関数"""
     headers = {
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15"
     }
@@ -66,7 +64,7 @@ async def fetch_paypay_info(paypay_url: str):
         print(f"PayPay Fetch Error: {e}")
         return None
 
-# --- 購入モーダル ＆ 決済フロー ---
+# --- 購入手続きモーダル ＆ 決済フロー ---
 class PurchaseModal(discord.ui.Modal, title="購入手続き"):
     paypay_url = discord.ui.TextInput(
         label="PayPay送金リンク",
@@ -88,14 +86,13 @@ class PurchaseModal(discord.ui.Modal, title="購入手続き"):
         max_length=30
     )
 
-    def __init__(self, machine_id: str, item_name: str, item_data: dict):
+    def __init__(self, machine_name: str, item_name: str, item_data: dict):
         super().__init__()
-        self.machine_id = machine_id
+        self.machine_name = machine_name
         self.item_name = item_name
         self.item_data = item_data
 
     async def on_submit(self, interaction: discord.Interaction):
-        # 3秒タイムアウトを防ぐため最優先で応答
         await interaction.response.defer(ephemeral=True)
 
         # 1. 個数確認
@@ -120,7 +117,7 @@ class PurchaseModal(discord.ui.Modal, title="購入手続き"):
         code = self.coupon_code.value.strip()
         if code in coupons:
             cp = coupons[code]
-            if cp["vending_machine_id"] == self.machine_id and cp["count"] > 0:
+            if cp.get("vending_machine_name") == self.machine_name and cp.get("count", 0) > 0:
                 total_price = max(0, total_price - cp["discount"])
                 cp["count"] -= 1
 
@@ -187,10 +184,10 @@ class PurchaseModal(discord.ui.Modal, title="購入手続き"):
 
 # --- 商品選択 ＆ 自販機ビュー ---
 class ItemSelect(discord.ui.Select):
-    def __init__(self, machine_id: str):
-        self.machine_id = machine_id
+    def __init__(self, machine_name: str):
+        self.machine_name = machine_name
         options = []
-        items = vending_machines.get(machine_id, {}).get("items", {})
+        items = vending_machines.get(machine_name, {}).get("items", {})
 
         for item_name, data in items.items():
             desc = f"価格: {data['price_manera']}円 (manera)"
@@ -208,68 +205,49 @@ class ItemSelect(discord.ui.Select):
             return
 
         selected_item_name = self.values[0]
-        item_data = vending_machines[self.machine_id]["items"][selected_item_name]
-        await interaction.response.send_modal(PurchaseModal(self.machine_id, selected_item_name, item_data))
+        item_data = vending_machines[self.machine_name]["items"][selected_item_name]
+        await interaction.response.send_modal(PurchaseModal(self.machine_name, selected_item_name, item_data))
 
 class ItemSelectView(discord.ui.View):
-    def __init__(self, machine_id: str):
+    def __init__(self, machine_name: str):
         super().__init__(timeout=None)
-        self.add_item(ItemSelect(machine_id))
+        self.add_item(ItemSelect(machine_name))
 
 class VendingMachineView(discord.ui.View):
-    def __init__(self, machine_id: str):
+    def __init__(self, machine_name: str):
         super().__init__(timeout=None)
-        self.machine_id = machine_id
+        self.machine_name = machine_name
 
     @discord.ui.button(label="購入する", style=discord.ButtonStyle.primary, emoji="🛒")
     async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = ItemSelectView(self.machine_id)
+        if self.machine_name not in vending_machines:
+            await interaction.response.send_message("⚠️ この自販機は現在利用できません。", ephemeral=True)
+            return
+        view = ItemSelectView(self.machine_name)
         await interaction.response.send_message("購入する商品を選んでください：", view=view, ephemeral=True)
 
-# --- 簡易ボタン認証ビュー ---
+# --- 認証ボタンのView ---
 class SimpleVerifyView(discord.ui.View):
-    def __init__(self, role: discord.Role, button_label: str):
+    def __init__(self, role_id: int, button_label: str):
         super().__init__(timeout=None)
-        self.role = role
-        self.verify_btn.label = button_label
+        self.role_id = role_id
+        
+        # ボタンを動的に作成
+        btn = discord.ui.Button(label=button_label, style=discord.ButtonStyle.success, custom_id="simple_verify_btn_action")
+        btn.callback = self.verify_callback
+        self.add_item(btn)
 
-    @discord.ui.button(style=discord.ButtonStyle.success, custom_id="simple_verify_btn")
-    async def verify_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def verify_callback(self, interaction: discord.Interaction):
+        role = interaction.guild.get_role(self.role_id)
+        if not role:
+            await interaction.response.send_message("❌ 付与するロールが見つかりませんでした。サーバー設定を確認してください。", ephemeral=True)
+            return
+
         try:
-            await interaction.user.add_roles(self.role)
-            await interaction.response.send_message(f"✅ 認証が完了し、{self.role.mention} を付与しました！", ephemeral=True)
+            await interaction.user.add_roles(role)
+            await interaction.response.send_message(f"✅ 認証が完了し、{role.mention} を付与しました！", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Botの権限不足のためロールを付与できませんでした。", ephemeral=True)
-
-# --- 自販機削除確認ビュー ---
-class DeleteConfirmView(discord.ui.View):
-    def __init__(self, machine_id: str, machine_name: str):
-        super().__init__(timeout=60)
-        self.machine_id = machine_id
-        self.machine_name = machine_name
-
-    @discord.ui.button(label="削除する", style=discord.ButtonStyle.red)
-    async def confirm_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.machine_id in vending_machines:
-            del vending_machines[self.machine_id]
-
-        embed = discord.Embed(
-            title="削除完了",
-            description=f"自販機「{self.machine_name}」を削除しました。",
-            color=discord.Color.green()
-        )
-        embed.set_footer(text="Developer @Alpha_shop.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
-    async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="キャンセル",
-            description="自販機削除をキャンセルしました。",
-            color=discord.Color.blue()
-        )
-        embed.set_footer(text="Developer @Alpha_shop.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message("❌ Botの権限が不足しているためロールを付与できませんでした。（Botのロール位置を一番上に上げてください）", ephemeral=True)
 
 
 # ================= コマンド定義 =================
@@ -297,39 +275,38 @@ async def remove_dm_sender(interaction: discord.Interaction):
 async def create_vending_machine(interaction: discord.Interaction, name: str):
     if not await check_authority(interaction): return
 
-    machine_id = str(hash(name))
-    vending_machines[machine_id] = {"name": name, "items": {}}
-
-    await interaction.response.send_message(f"自販機 **{name}** を作成しました。\nID: `{machine_id}`", ephemeral=True)
+    vending_machines[name] = {"name": name, "items": {}}
+    await interaction.response.send_message(f"✅ 自販機 **{name}** を作成しました。", ephemeral=True)
 
 @bot.tree.command(name="自販機削除", description="指定した自販機を削除します")
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
-async def delete_vending_machine(interaction: discord.Interaction, vending_machine_id: str):
+@app_commands.autocomplete(name=vending_machine_name_autocomplete)
+async def delete_vending_machine(interaction: discord.Interaction, name: str):
     if not await check_authority(interaction): return
 
-    if vending_machine_id not in vending_machines:
+    if name not in vending_machines:
         await interaction.response.send_message("⚠️ 指定された自販機が見つかりません。", ephemeral=True)
         return
 
-    machine_name = vending_machines[vending_machine_id]["name"]
+    del vending_machines[name]
     embed = discord.Embed(
-        title="自販機削除確認",
-        description=f"本当に自販機「{machine_name}」を削除しますか？\n\n**この操作は取り消せません。**",
-        color=discord.Color.red()
+        title="削除完了",
+        description=f"自販機「{name}」を削除しました。",
+        color=discord.Color.green()
     )
     embed.set_footer(text="Developer @Alpha_shop.")
-    await interaction.response.send_message(embed=embed, view=DeleteConfirmView(vending_machine_id, machine_name), ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="自販機設置", description="指定した自販機の購入パネルを設置します")
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+@app_commands.autocomplete(name=vending_machine_name_autocomplete)
 async def setup_vending_machine(
     interaction: discord.Interaction, 
-    vending_machine_id: str, 
+    name: str, 
     panel_title: str = None, 
     panel_description: str = None
 ):
     if not await check_authority(interaction): return
 
+    # 承認DMチェック（赤色Embed 404表示）
     if APPROVED_ROLE_ID is None:
         embed = discord.Embed(
             title="エラー",
@@ -339,24 +316,24 @@ async def setup_vending_machine(
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    if vending_machine_id not in vending_machines:
-        await interaction.response.send_message("指定された自販機が見つかりません。", ephemeral=True)
+    if name not in vending_machines:
+        await interaction.response.send_message("⚠️ 指定された自販機が見つかりません。", ephemeral=True)
         return
 
-    machine_data = vending_machines[vending_machine_id]
+    machine_data = vending_machines[name]
     title = panel_title if panel_title else f"🏪 【自販機】{machine_data['name']}"
     desc = panel_description if panel_description else "下の「購入する」ボタンを押して商品を選択してください。"
 
     embed = discord.Embed(title=title, description=desc, color=discord.Color.blue())
-    view = VendingMachineView(machine_id=vending_machine_id)
+    view = VendingMachineView(machine_name=name)
     await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message(f"自販機『{machine_data['name']}』パネルを設置しました！", ephemeral=True)
+    await interaction.response.send_message(f"✅ 自販機『{machine_data['name']}』のパネルを設置しました！", ephemeral=True)
 
 @bot.tree.command(name="商品追加", description="自販機に新しい商品を追加します")
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+@app_commands.autocomplete(vending_machine_name=vending_machine_name_autocomplete)
 async def add_item(
     interaction: discord.Interaction, 
-    vending_machine_id: str, 
+    vending_machine_name: str, 
     name: str, 
     price_manera: int, 
     description: str = "", 
@@ -364,11 +341,11 @@ async def add_item(
 ):
     if not await check_authority(interaction): return
 
-    if vending_machine_id not in vending_machines:
-        await interaction.response.send_message("指定された自販機が見つかりません。", ephemeral=True)
+    if vending_machine_name not in vending_machines:
+        await interaction.response.send_message("⚠️ 指定された自販機が見つかりません。", ephemeral=True)
         return
 
-    vending_machines[vending_machine_id]["items"][name] = {
+    vending_machines[vending_machine_name]["items"][name] = {
         "name": name,
         "price_manera": price_manera,
         "description": description,
@@ -376,7 +353,24 @@ async def add_item(
         "stock_type": "有限",
         "stocks": []
     }
-    await interaction.response.send_message(f"✅ 商品『{name}』({price_manera}円) を追加しました！", ephemeral=True)
+    await interaction.response.send_message(f"✅ 自販機『{vending_machine_name}』に商品『{name}』({price_manera}円) を追加しました！", ephemeral=True)
+
+@bot.tree.command(name="在庫追加", description="商品に在庫を追加します")
+@app_commands.autocomplete(vending_machine_name=vending_machine_name_autocomplete)
+async def add_stock(
+    interaction: discord.Interaction,
+    vending_machine_name: str,
+    item_name: str,
+    stock_content: str
+):
+    if not await check_authority(interaction): return
+
+    if vending_machine_name not in vending_machines or item_name not in vending_machines[vending_machine_name]["items"]:
+        await interaction.response.send_message("⚠️ 自販機または商品が見つかりません。", ephemeral=True)
+        return
+
+    vending_machines[vending_machine_name]["items"][item_name]["stocks"].append(stock_content)
+    await interaction.response.send_message(f"✅ 『{item_name}』に在庫を追加しました！（現在: {len(vending_machines[vending_machine_name]['items'][item_name]['stocks'])}個）", ephemeral=True)
 
 
 # --- 簡易ボタン認証コマンド ---
@@ -391,7 +385,7 @@ async def setup_simple_verify(
     if not await check_authority(interaction): return
 
     embed = discord.Embed(title=title, description=description, color=discord.Color.green())
-    view = SimpleVerifyView(role=role, button_label=buttonlabel)
+    view = SimpleVerifyView(role_id=role.id, button_label=buttonlabel)
     await interaction.channel.send(embed=embed, view=view)
     await interaction.response.send_message("✅ 認証パネルを設置しました！", ephemeral=True)
 
@@ -456,7 +450,7 @@ async def help_command(interaction: discord.Interaction):
     )
     embed.add_field(
         name="🏪 自販機管理",
-        value="`/自販機作成`, `/自販機削除`, `/自販機設置`, `/商品追加`",
+        value="`/自販機作成`, `/自販機削除`, `/自販機設置`, `/商品追加`, `/在庫追加`",
         inline=False
     )
     embed.add_field(
