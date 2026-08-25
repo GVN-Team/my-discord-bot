@@ -152,6 +152,7 @@ class PurchaseModal(discord.ui.Modal, title="購入手続き"):
             except Exception as e:
                 print(f"管理者DM送信エラー: {e}")
 
+
 class ItemSelect(discord.ui.Select):
     def __init__(self, machine_id: str):
         self.machine_id = machine_id
@@ -210,7 +211,7 @@ class SimpleVerifyView(discord.ui.View):
         except discord.Forbidden:
             await interaction.response.send_message("❌ Botの権限不足のためロールを付与できませんでした。", ephemeral=True)
 
-# ================= 各種コマンド =================
+# ================= 各種基本コマンド =================
 
 @bot.tree.command(name="承認dm設定", description="サーバー管理者（オーナー）のDMへ購入通知を設定します")
 async def setup_dm_sender(interaction: discord.Interaction):
@@ -283,177 +284,185 @@ async def setup_simple_verify(interaction: discord.Interaction, role: discord.Ro
     await interaction.channel.send(embed=embed, view=view)
     await interaction.response.send_message("✅ 認証パネルを設置しました！", ephemeral=True)
 
-# ================= 全体バックアップ ＆ 全削除・復元ロード =================
 
-@bot.tree.command(name="backup", description="サーバー全体（ロール・チャンネル・メッセージ・スレッド等）をバックアップします")
+# ================= バックアップ ＆ 完全ロード機能 =================
+
+@bot.tree.command(name="バックアップ作成", description="サーバーの完全バックアップを作成します")
 async def create_backup(interaction: discord.Interaction):
     if not await check_authority(interaction): return
-
     await interaction.response.defer(ephemeral=True)
+
     guild = interaction.guild
-    backup_key = generate_key(8)
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    backup_id = generate_key(6)
 
-    roles_data = [
-        {"name": r.name, "color": r.color.value, "permissions": r.permissions.value, "hoist": r.hoist, "mentionable": r.mentionable}
-        for r in reversed(guild.roles) if not r.is_default() and not r.managed
-    ]
+    # ロールデータの取得
+    roles_data = []
+    for r in sorted(guild.roles, key=lambda x: x.position):
+        if not r.is_default() and not r.managed:
+            roles_data.append({
+                "name": r.name,
+                "permissions": r.permissions.value,
+                "color": r.color.value,
+                "hoist": r.hoist,
+                "mentionable": r.mentionable
+            })
 
+    # カテゴリとチャンネルデータの取得（メッセージ取得付き）
     categories_data = []
-    stats = {"roles": len(roles_data), "categories": len(guild.categories), "text": 0, "voice": 0, "forum": 0, "threads": 0, "messages": 0}
-
-    async def fetch_channel_messages(channel):
-        msgs = []
-        try:
-            async for m in channel.history(limit=50, oldest_first=True):
-                if m.type == discord.MessageType.default:
-                    msgs.append({"author": m.author.display_name, "content": m.content, "attachments": [a.url for a in m.attachments]})
-        except Exception: pass
-        return msgs
-
-    for category in guild.categories:
-        cat_dict = {"name": category.name, "channels": []}
-        for ch in category.channels:
-            ch_data = {"name": ch.name, "type": str(ch.type), "messages": [], "threads": []}
+    for cat in guild.categories:
+        cat_channels = []
+        for ch in cat.channels:
+            ch_info = {"name": ch.name, "type": str(ch.type), "topic": getattr(ch, "topic", None), "messages": []}
             if isinstance(ch, discord.TextChannel):
-                stats["text"] += 1
-                ch_data["messages"] = await fetch_channel_messages(ch)
-                stats["messages"] += len(ch_data["messages"])
-                for th in ch.threads:
-                    stats["threads"] += 1
-                    th_msgs = await fetch_channel_messages(th)
-                    stats["messages"] += len(th_msgs)
-                    ch_data["threads"].append({"name": th.name, "messages": th_msgs})
-            elif isinstance(ch, discord.VoiceChannel):
-                stats["voice"] += 1
-            elif isinstance(ch, discord.ForumChannel):
-                stats["forum"] += 1
-            cat_dict["channels"].append(ch_data)
-        categories_data.append(cat_dict)
+                try:
+                    async for msg in ch.history(limit=50, oldest_first=True):
+                        if not msg.author.bot:
+                            ch_info["messages"].append({"author": msg.author.display_name, "content": msg.content})
+                except Exception:
+                    pass
+            cat_channels.append(ch_info)
+        categories_data.append({"name": cat.name, "channels": cat_channels})
 
-    backups[backup_key] = {"guild_id": guild.id, "created_at": now_str, "roles": roles_data, "categories": categories_data, "stats": stats}
+    # カテゴリ外チャンネルデータの取得
+    no_cat_channels = []
+    for ch in guild.channels:
+        if ch.category is None and not isinstance(ch, discord.CategoryChannel):
+            ch_info = {"name": ch.name, "type": str(ch.type), "topic": getattr(ch, "topic", None), "messages": []}
+            if isinstance(ch, discord.TextChannel):
+                try:
+                    async for msg in ch.history(limit=50, oldest_first=True):
+                        if not msg.author.bot:
+                            ch_info["messages"].append({"author": msg.author.display_name, "content": msg.content})
+                except Exception:
+                    pass
+            no_cat_channels.append(ch_info)
 
-    user_data_path = f"data/users/{interaction.user.id}/{guild.id}/{now_str}"
-    blob_path = f"data/users/{interaction.user.id}/_blobs"
+    backups[backup_id] = {
+        "roles": roles_data,
+        "categories": categories_data,
+        "no_cat_channels": no_cat_channels,
+        "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
 
-    embed = discord.Embed(title="完了", description="✅ バックアップ完了", color=discord.Color.green())
-    embed.add_field(name="• ID", value=f"`{backup_key}`", inline=False)
-    embed.add_field(name="• 保存先", value=f"`{user_data_path}`", inline=False)
-    embed.add_field(name="• 構成内訳", value=(
-        f"・ ロール: {stats['roles']} / カテゴリ: {stats['categories']}\n"
-        f"・ テキスト: {stats['text']} / ボイス: {stats['voice']} / フォーラム: {stats['forum']} / スレッド: {stats['threads']}\n"
-        f"・ メッセージ: {stats['messages']}"
-    ), inline=False)
-    embed.add_field(name="• 自動削除", value="30日後", inline=False)
-    embed.add_field(name="• ブロブ", value=f"`{blob_path}`", inline=False)
+    await interaction.followup.send(f"📦 **完全バックアップを作成しました！**\n・バックアップID: `{backup_id}`\n・保存ロール数: {len(roles_data)}件\n・保存カテゴリ数: {len(categories_data)}件", ephemeral=True)
 
-    await interaction.followup.send(embed=embed, ephemeral=True)
-
-
-@bot.tree.command(name="ロード", description="サーバーを全削除し、バックアップデータを復元します")
-async def load_backup(interaction: discord.Interaction, key: str):
+@bot.tree.command(name="バックアップロード", description="既存のチャンネル・ロールを全削除して復元します")
+async def load_backup(interaction: discord.Interaction, backup_id: str):
     if not await check_authority(interaction): return
-    if key not in backups:
-        await interaction.response.send_message("❌ 指定されたIDのバックアップが見つかりません。", ephemeral=True)
+    if backup_id not in backups:
+        await interaction.response.send_message("❌ 指定されたバックアップIDが見つかりません。", ephemeral=True)
         return
 
-    data = backups[key]
-    stats = data["stats"]
+    await interaction.response.send_message("⚠️ 復元プロセスを開始します。現在の全チャンネル・ロールを削除して作成し直します...", ephemeral=True)
     guild = interaction.guild
-    user = interaction.user
+    data = backups[backup_id]
 
-    await interaction.response.send_message("⚠️ サーバーの全削除および復元を開始します。進捗および完了通知はDMに送信されます。", ephemeral=True)
-    try: await user.send("🔄 **復元処理を開始しました。完了までそのままお待ちください...**")
-    except discord.Forbidden: pass
+    status_msg = await interaction.channel.send("🔄 【1/3】既存チャンネル・ロールの全削除を開始中...")
 
-    # 1. 全削除
-    for ch in guild.channels:
-        try: await ch.delete()
-        except Exception: pass
-    for r in guild.roles:
-        if not r.is_default() and not r.managed and r < guild.me.top_role:
-            try: await r.delete()
-            except Exception: pass
-
-    # 2. 全復元
-    res = {"role_success": 0, "role_fail": 0, "cat_success": 0, "cat_fail": 0, "text_success": 0, "text_fail": 0, "voice_success": 0, "voice_fail": 0, "forum_success": 0, "forum_fail": 0, "thread_success": 0, "thread_fail": 0, "msg_success": 0, "msg_fail": 0}
-
-    for r_info in data["roles"]:
+    # 1. 既存チャンネルの全削除
+    deleted_ch_count = 0
+    for ch in list(guild.channels):
         try:
-            await guild.create_role(name=r_info["name"], color=discord.Color(r_info["color"]), permissions=discord.Permissions(r_info["permissions"]), hoist=r_info["hoist"], mentionable=r_info["mentionable"])
-            res["role_success"] += 1
-        except Exception: res["role_fail"] += 1
-
-    for cat_info in data["categories"]:
-        try:
-            new_cat = await guild.create_category(name=cat_info["name"])
-            res["cat_success"] += 1
+            await ch.delete()
+            deleted_ch_count += 1
+            await asyncio.sleep(0.3)
         except Exception:
-            res["cat_fail"] += 1
-            new_cat = None
+            pass
 
-        for ch_info in cat_info["channels"]:
-            ch_type = ch_info["type"]
-            if "text" in ch_type:
+    # 2. 既存ロールの削除
+    deleted_role_count = 0
+    for r in list(guild.roles):
+        if not r.is_default() and not r.managed and r < guild.me.top_role:
+            try:
+                await r.delete()
+                deleted_role_count += 1
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
+
+    # 3. ロール復元
+    created_roles_count = 0
+    failed_roles_count = 0
+    for r_data in data["roles"]:
+        try:
+            await guild.create_role(
+                name=r_data["name"],
+                permissions=discord.Permissions(r_data["permissions"]),
+                color=discord.Color(r_data["color"]),
+                hoist=r_data["hoist"],
+                mentionable=r_data["mentionable"]
+            )
+            created_roles_count += 1
+            await asyncio.sleep(0.3)
+        except Exception:
+            failed_roles_count += 1
+
+    # 4. カテゴリ・チャンネル復元
+    created_ch_count = 0
+    failed_ch_count = 0
+
+    for cat_data in data["categories"]:
+        try:
+            new_cat = await guild.create_category(cat_data["name"])
+            for ch_data in cat_data["channels"]:
                 try:
-                    created_ch = await guild.create_text_channel(name=ch_info["name"], category=new_cat)
-                    res["text_success"] += 1
+                    if ch_data["type"] == "text":
+                        new_ch = await new_cat.create_text_channel(ch_data["name"], topic=ch_data["topic"])
+                        for m in ch_data.get("messages", []):
+                            await new_ch.send(f"**[{m['author']}]**: {m['content']}")
+                    elif ch_data["type"] == "voice":
+                        await new_cat.create_voice_channel(ch_data["name"])
+                    elif ch_data["type"] in ["forum", "news"]:
+                        await new_cat.create_text_channel(ch_data["name"])
+                    created_ch_count += 1
                 except Exception:
-                    res["text_fail"] += 1
-                    created_ch = None
+                    failed_ch_count += 1
+                await asyncio.sleep(0.3)
+        except Exception:
+            pass
 
-                if created_ch:
-                    for m in ch_info.get("messages", []):
-                        try:
-                            content = f"**{m['author']}**: {m['content']}"
-                            if m["attachments"]: content += "\n" + "\n".join(m["attachments"])
-                            await created_ch.send(content)
-                            res["msg_success"] += 1
-                        except Exception: res["msg_fail"] += 1
+    for ch_data in data["no_cat_channels"]:
+        try:
+            if ch_data["type"] == "text":
+                new_ch = await guild.create_text_channel(ch_data["name"], topic=ch_data["topic"])
+                for m in ch_data.get("messages", []):
+                    await new_ch.send(f"**[{m['author']}]**: {m['content']}")
+            elif ch_data["type"] == "voice":
+                await guild.create_voice_channel(ch_data["name"])
+            else:
+                await guild.create_text_channel(ch_data["name"])
+            created_ch_count += 1
+        except Exception:
+            failed_ch_count += 1
+        await asyncio.sleep(0.3)
 
-                    for th_info in ch_info.get("threads", []):
-                        try:
-                            new_th = await created_ch.create_thread(name=th_info["name"], type=discord.ChannelType.public_thread)
-                            res["thread_success"] += 1
-                            for tm in th_info.get("messages", []):
-                                try:
-                                    t_content = f"**{tm['author']}**: {tm['content']}"
-                                    if tm["attachments"]: t_content += "\n" + "\n".join(tm["attachments"])
-                                    await new_th.send(t_content)
-                                    res["msg_success"] += 1
-                                except Exception: res["msg_fail"] += 1
-                        except Exception: res["thread_fail"] += 1
-
-            elif "voice" in ch_type:
-                try:
-                    await guild.create_voice_channel(name=ch_info["name"], category=new_cat)
-                    res["voice_success"] += 1
-                except Exception: res["voice_fail"] += 1
-            elif "forum" in ch_type:
-                try:
-                    await guild.create_forum(name=ch_info["name"], category=new_cat)
-                    res["forum_success"] += 1
-                except Exception: res["forum_fail"] += 1
-
-    # 3. 画像通りのDM結果通知
-    embed = discord.Embed(title="完了", description="✅ **復元完了（既存チャンネル/カテゴリ/ロールは削除済み）**", color=discord.Color.green())
-    embed.add_field(name="• ID", value=f"`{key}`", inline=False)
-    embed.add_field(name="• ロール", value=f"作成 {res['role_success']} / 失敗 {res['role_fail']} / 期待 {stats['roles']}", inline=False)
-    embed.add_field(name="• カテゴリ", value=f"作成 {res['cat_success']} / 失敗 {res['cat_fail']} / 期待 {stats['categories']}", inline=False)
-    embed.add_field(name="• テキスト", value=f"作成 {res['text_success']} / 失敗 {res['text_fail']} / 期待 {stats['text']}", inline=False)
-    embed.add_field(name="• ボイス", value=f"作成 {res['voice_success']} / 失敗 {res['voice_fail']} / 期待 {stats['voice']}", inline=False)
-    embed.add_field(name="• フォーラム", value=f"作成 {res['forum_success']} / 失敗 {res['forum_fail']} / 期待 {stats['forum']}", inline=False)
-    embed.add_field(name="• スレッド", value=f"作成 {res['thread_success']} / 失敗 {res['thread_fail']} / 期待 {stats['threads']}", inline=False)
-    embed.add_field(name="• メッセージ", value=f"合計 {res['msg_success']} / 送信失敗 {res['msg_fail']}", inline=False)
-
-    try: await user.send(embed=embed)
-    except Exception as e: print(f"DM送信エラー: {e}")
+    # 最終アナウンス用チャンネル作成＆通知
+    try:
+        sys_ch = await guild.create_text_channel("復元完了通知")
+        expected_roles = len(data["roles"])
+        expected_channels = sum(len(c["channels"]) for c in data["categories"]) + len(data["no_cat_channels"])
+        
+        embed = discord.Embed(title="✅ バックアップ復元完了報告", color=discord.Color.green())
+        embed.add_field(
+            name="🎭 ロール復元結果",
+            value=f"・作成: `{created_roles_count}`\n・失敗: `{failed_roles_count}`\n・期待: `{expected_roles}`",
+            inline=False
+        )
+        embed.add_field(
+            name="📁 チャンネル復元結果",
+            value=f"・作成: `{created_ch_count}`\n・失敗: `{failed_ch_count}`\n・期待: `{expected_channels}`",
+            inline=False
+        )
+        await sys_ch.send(embed=embed)
+    except Exception as e:
+        print(f"復元通知送信エラー: {e}")
 
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    print(f"Logged in as {bot.user}")
+    print(f"Logged in as {bot.user} (Commands Synced)")
 
+# ================= 起動処理 =================
 keep_alive()
 TOKEN = os.getenv("DISCORD_TOKEN")
 bot.run(TOKEN)
