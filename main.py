@@ -6,9 +6,30 @@ import asyncio
 import traceback
 from datetime import datetime, timedelta
 from typing import Optional, Union, Dict
+from threading import Thread
+from flask import Flask
 
 import discord
 from discord.ext import commands, tasks
+
+# =========================================================
+# Webサーバー設定（Renderのポートエラー回避用）
+# =========================================================
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.start()
+
+# Webサーバーをバックグラウンドで起動
 
 # =========================================================
 # 1. Bot基本設定とIntents（権限）の完全有効化
@@ -606,6 +627,7 @@ async def on_command_error(ctx, error):
         print(f"エラー発生: {error}", file=sys.stderr)
 
 if __name__ == "__main__":
+    keep_alive()
     TOKEN = os.getenv("DISCORD_TOKEN")
     if TOKEN:
         try:
