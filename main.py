@@ -39,7 +39,7 @@ def keep_alive():
 intents = discord.Intents.all()
 
 bot = commands.Bot(
-    command_prefix="/",
+    command_prefix="!",
     intents=intents,
     help_command=None
 )
@@ -287,4 +287,336 @@ async def user_info(ctx, member: discord.Member = None):
     embed.add_field(name="アカウント作成日時", value=member.created_at.strftime("%Y/%m/%d %H:%M:%S"), inline=False)
     embed.add_field(name="サーバー参加日時", value=member.joined_at.strftime("%Y/%m/%d %H:%M:%S"), inline=False)
     embed.add_field(name=f"保有ロール ({len(roles)})", value=roles_str, inline=False)
-    embed.add_field(name="主な所持権限", value=f"```{perm_str}
+    embed.add_field(name="主な所持権限", value=f"```{perm_str}```", inline=False)
+    embed.set_footer(text=f"実行者: {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+
+    await ctx.send(embed=embed)
+
+@bot.command(name="serverinfo", aliases=["server", "si"])
+async def server_info(ctx):
+    guild = ctx.guild
+    total_members = guild.member_count
+    bots = sum(1 for m in guild.members if m.bot)
+    humans = total_members - bots
+    
+    text_channels = len(guild.text_channels)
+    voice_channels = len(guild.voice_channels)
+    categories = len(guild.categories)
+    roles_count = len(guild.roles)
+
+    embed = discord.Embed(
+        title=f"🏰 {guild.name} サーバー統計情報",
+        color=discord.Color.gold(),
+        timestamp=datetime.utcnow()
+    )
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+        
+    embed.add_field(name="サーバーID", value=f"`{guild.id}`", inline=True)
+    embed.add_field(name="サーバー所有者", value=f"{guild.owner.mention}", inline=True)
+    embed.add_field(name="開設日時", value=guild.created_at.strftime("%Y/%m/%d %H:%M"), inline=True)
+    
+    embed.add_field(
+        name=f"👥 メンバー構成 ({total_members}名)",
+        value=f"└ ユーザー: **{humans}** 名\n└ Bot: **{bots}** つ",
+        inline=True
+    )
+    embed.add_field(
+        name="💬 チャンネル構成",
+        value=f"└ テキスト: **{text_channels}**\n└ ボイス: **{voice_channels}**\n└ カテゴリ: **{categories}**",
+        inline=True
+    )
+    embed.add_field(
+        name="🛡️ その他データ",
+        value=f"└ ロール数: **{roles_count}**\n└ ブースト数: **{guild.premium_subscription_count}**",
+        inline=True
+    )
+    embed.set_footer(text=f"Requested by {ctx.author.name}")
+
+    await ctx.send(embed=embed)
+
+
+# =========================================================
+# 7. 高度なロール管理機能
+# =========================================================
+@bot.command(name="addrole", aliases=["roleadd"])
+@commands.has_permissions(manage_roles=True)
+async def add_role(ctx, member: discord.Member, *, role_input: str):
+    role = discord.utils.get(ctx.guild.roles, name=role_input)
+    if not role and role_input.startswith("<@&") and role_input.endswith(">"):
+        role_id = int(role_input[3:-1])
+        role = ctx.guild.get_role(role_id)
+        
+    if not role:
+        await ctx.send(f"❌ エラー: `{role_input}` というロールが見つかりません。")
+        return
+
+    if role.position >= ctx.guild.me.top_role.position:
+        await ctx.send("❌ エラー: Botの最上位ロールより高い（または同じ）位置にあるロールは操作できません。")
+        return
+
+    if role in member.roles:
+        await ctx.send(f"⚠️ {member.mention} は既に `{role.name}` ロールを保持しています。")
+        return
+
+    await member.add_roles(role)
+    embed = discord.Embed(
+        title="✅ ロール付与完了",
+        description=f"{member.mention} に `{role.name}` ロールを付与しました。",
+        color=discord.Color.green()
+    )
+    await ctx.send(embed=embed)
+    await send_log(ctx.guild, "🛡️ ロール手動付与", f"実行者: {ctx.author.mention}\n対象: {member.mention}\n付与ロール: `{role.name}`")
+
+@bot.command(name="removerole", aliases=["roleremove", "delrole"])
+@commands.has_permissions(manage_roles=True)
+async def remove_role(ctx, member: discord.Member, *, role_input: str):
+    role = discord.utils.get(ctx.guild.roles, name=role_input)
+    if not role and role_input.startswith("<@&") and role_input.endswith(">"):
+        role_id = int(role_input[3:-1])
+        role = ctx.guild.get_role(role_id)
+
+    if not role:
+        await ctx.send(f"❌ エラー: `{role_input}` というロールが見つかりません。")
+        return
+
+    if role.position >= ctx.guild.me.top_role.position:
+        await ctx.send("❌ エラー: Botの最上位ロールより高い位置にあるロールは操作できません。")
+        return
+
+    if role not in member.roles:
+        await ctx.send(f"⚠️ {member.mention} は `{role.name}` ロールを持っていません。")
+        return
+
+    await member.remove_roles(role)
+    embed = discord.Embed(
+        title="🗑️ ロール削除完了",
+        description=f"{member.mention} から `{role.name}` ロールを剥奪しました。",
+        color=discord.Color.orange()
+    )
+    await ctx.send(embed=embed)
+    await send_log(ctx.guild, "🛡️ ロール手動剥奪", f"実行者: {ctx.author.mention}\n対象: {member.mention}\n剥奪ロール: `{role.name}`", discord.Color.orange())
+
+@bot.command(name="roleall")
+@commands.has_permissions(administrator=True)
+async def role_all(ctx, *, role_input: str):
+    role = discord.utils.get(ctx.guild.roles, name=role_input)
+    if not role:
+        await ctx.send(f"❌ エラー: `{role_input}` というロールが見つかりません。")
+        return
+
+    msg = await ctx.send(f"🔄 **{role.name}** を全一般メンバー（Bot除く）に一括付与しています... 少々お待ちください。")
+    count = 0
+    for member in ctx.guild.members:
+        if not member.bot and role not in member.roles:
+            try:
+                await member.add_roles(role)
+                count += 1
+                await asyncio.sleep(0.5)
+            except Exception:
+                continue
+
+    await msg.edit(content=f"✅ 処理完了: 計 **{count}** 名のメンバーに `{role.name}` ロールを一括付与しました。")
+    await send_log(ctx.guild, "🛡️ ロール一括付与", f"実行者: {ctx.author.mention}\n対象人数: {count}名\n対象ロール: `{role.name}`")
+
+@bot.command(name="roles", aliases=["rolelist"])
+async def list_roles(ctx):
+    roles = sorted([r for r in ctx.guild.roles if r.name != "@everyone"], key=lambda r: r.position, reverse=True)
+    
+    if not roles:
+        await ctx.send("現在カスタムロールはありません。")
+        return
+
+    description_lines = []
+    for r in roles[:20]:
+        description_lines.append(f"• {r.mention} — **{len(r.members)}** 名 (ID: `{r.id}`)")
+
+    embed = discord.Embed(
+        title=f"📜 {ctx.guild.name} のロール一覧",
+        description="\n".join(description_lines),
+        color=discord.Color.blue()
+    )
+    if len(roles) > 20:
+        embed.set_footer(text=f"他 {len(roles) - 20} 個のロールが存在します。")
+
+    await ctx.send(embed=embed)
+
+
+# =========================================================
+# 8. モデレーション機能 (Kick, Ban, Mute, Clear)
+# =========================================================
+@bot.command(name="clear", aliases=["purge", "clean"])
+@commands.has_permissions(manage_messages=True)
+async def clear_messages(ctx, amount: int = 10):
+    if amount < 1:
+        await ctx.send("❌ 1以上の数値を指定してください。")
+        return
+    
+    if amount > 100:
+        await ctx.send("⚠️ 1度に削除できるメッセージは最大100件までです。100件に制限して実行します。")
+        amount = 100
+
+    deleted = await ctx.channel.purge(limit=amount + 1)
+    
+    msg = await ctx.send(f"🧹 **{len(deleted) - 1}** 件のメッセージを削除しました。")
+    await send_log(
+        ctx.guild, 
+        "🧹 メッセージ一括削除", 
+        f"実行者: {ctx.author.mention}\n実行チャンネル: {ctx.channel.mention}\n削除件数: {len(deleted) - 1}件",
+        discord.Color.gold()
+    )
+    
+    await asyncio.sleep(3)
+    try:
+        await msg.delete()
+    except discord.NotFound:
+        pass
+
+@bot.command(name="kick")
+@commands.has_permissions(kick_members=True)
+async def kick_member(ctx, member: discord.Member, *, reason: str = "理由なし"):
+    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+        await ctx.send("❌ 自分と同等以上の権限を持つメンバーをキックすることはできません。")
+        return
+
+    try:
+        await member.kick(reason=reason)
+        embed = discord.Embed(
+            title="👞 メンバーをキックしました",
+            description=f"対象: {member.mention}\n理由: {reason}",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        await send_log(ctx.guild, "👞 Kick実行", f"実行者: {ctx.author.mention}\n対象: {member.mention} (`{member.id}`)\n理由: {reason}", discord.Color.red())
+    except Exception as e:
+        await ctx.send(f"❌ キック処理に失敗しました: {e}")
+
+@bot.command(name="ban")
+@commands.has_permissions(ban_members=True)
+async def ban_member(ctx, user: Union[discord.Member, discord.User], *, reason: str = "理由なし"):
+    try:
+        await ctx.guild.ban(user, reason=reason)
+        embed = discord.Embed(
+            title="🔨 メンバーをBANしました",
+            description=f"対象: {user.mention}\n理由: {reason}",
+            color=discord.Color.dark_red()
+        )
+        await ctx.send(embed=embed)
+        await send_log(ctx.guild, "🔨 BAN実行", f"実行者: {ctx.author.mention}\n対象: {user.mention} (`{user.id}`)\n理由: {reason}", discord.Color.dark_red())
+    except Exception as e:
+        await ctx.send(f"❌ BAN処理に失敗しました: {e}")
+
+@bot.command(name="timeout", aliases=["mute"])
+@commands.has_permissions(moderate_members=True)
+async def timeout_member(ctx, member: discord.Member, minutes: int = 10, *, reason: str = "理由なし"):
+    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+        await ctx.send("❌ 自分と同等以上の権限を持つメンバーをタイムアウトすることはできません。")
+        return
+
+    duration = timedelta(minutes=minutes)
+    try:
+        await member.timeout(duration, reason=reason)
+        embed = discord.Embed(
+            title="🤐 タイムアウトを設定しました",
+            description=f"対象: {member.mention}\n期間: **{minutes}** 分間\n理由: {reason}",
+            color=discord.Color.dark_gold()
+        )
+        await ctx.send(embed=embed)
+        await send_log(ctx.guild, "🤐 タイムアウト設定", f"実行者: {ctx.author.mention}\n対象: {member.mention}\n期間: {minutes}分\n理由: {reason}", discord.Color.dark_gold())
+    except Exception as e:
+        await ctx.send(f"❌ タイムアウト処理に失敗しました: {e}")
+
+
+# =========================================================
+# 9. 自動安全フィルター & メッセージ受信イベント
+# =========================================================
+NG_WORDS = ["荒らし", "スパム", "Discord招待リンク禁止"]
+
+@bot.event
+async def on_message(message):
+    if message.author.bot or not message.guild:
+        return
+
+    for word in NG_WORDS:
+        if word in message.content and not message.author.guild_permissions.administrator:
+            try:
+                await message.delete()
+                warning_msg = await message.channel.send(
+                    f"⚠️ {message.author.mention} 不適切なワードが含まれていたため削除しました。"
+                )
+                await send_log(
+                    message.guild,
+                    "⚠️ NGワード検知削除",
+                    f"送信者: {message.author.mention}\nチャンネル: {message.channel.mention}\n内容: `{message.content}`",
+                    discord.Color.red()
+                )
+                await asyncio.sleep(4)
+                await warning_msg.delete()
+                return
+            except discord.Forbidden:
+                pass
+
+    await process_exp(message)
+    await bot.process_commands(message)
+
+
+# =========================================================
+# 10. ヘルプ & エラーハンドリング & 起動メイン処理
+# =========================================================
+@bot.command(name="help")
+async def custom_help(ctx):
+    embed = discord.Embed(
+        title="🤖 Bot コマンドヘルプ一覧",
+        description="利用可能なコマンドの一覧です。",
+        color=discord.Color.blue(),
+        timestamp=datetime.utcnow()
+    )
+
+    embed.add_field(
+        name="👤 ユーザー・レベル機能",
+        value="`!userinfo` : ユーザー情報\n`!serverinfo` : サーバー統計\n`!rank` : レベル確認\n`!ping` : 応答速度",
+        inline=False
+    )
+    embed.add_field(
+        name="🛡️ ロール・チケット管理",
+        value="`!addrole` / `!removerole` : ロール操作\n`!roleall` : 一括ロール付与\n`!roles` : ロール一覧\n`!setup_ticket` : チケット設置",
+        inline=False
+    )
+    embed.add_field(
+        name="👞 モデレーション",
+        value="`!clear [件数]` : メッセージ削除\n`!timeout` : タイムアウト\n`!kick` / `!ban` : キック・BAN",
+        inline=False
+    )
+
+    embed.set_footer(text=f"実行者: {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+
+@bot.command(name="ping")
+async def ping_check(ctx):
+    latency = round(bot.latency * 1000)
+    await ctx.send(f"🏓 Pong! レイテンシ: **{latency} ms**")
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("🚫 このコマンドを実行する権限が不足しています。")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"⚠️ 引数が不足しています。`!help` を確認してください。")
+    else:
+        print(f"エラー発生: {error}", file=sys.stderr)
+
+if __name__ == "__main__":
+    # Webサーバーを先に別スレッドで立ち上げる
+    keep_alive()
+    
+    # Discord Botの起動
+    TOKEN = os.getenv("DISCORD_TOKEN")
+    if TOKEN:
+        try:
+            bot.run(TOKEN)
+        except Exception as e:
+            print(f"❌ 起動エラー: {e}")
+    else:
+        print("❌ エラー: DISCORD_TOKEN が設定されていません。")
