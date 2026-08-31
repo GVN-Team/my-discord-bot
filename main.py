@@ -19,16 +19,13 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    # UptimeRobotからのアクセスを受け取るエンドポイント
     return "Bot is running!"
 
 def run_web():
-    # Renderから割り当てられるPORTを取得（デフォルト10000）
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
-    # Discord Botと同時に動かすためスレッドで起動
     t = Thread(target=run_web)
     t.start()
 
@@ -74,20 +71,28 @@ load_data()
 
 
 # =========================================================
-# 3. イベント＆詳細ログ監視システム
+# 3. イベント＆スラッシュコマンド同期
 # =========================================================
 @bot.event
 async def on_ready():
     print("==================================================")
     print(f" ログイン完了: {bot.user.name} (ID: {bot.user.id})")
     print(f" 参加サーバー数: {len(bot.guilds)}")
+    
+    # スラッシュコマンドをDiscordサーバーと同期
+    try:
+        synced = await bot.tree.sync()
+        print(f" スラッシュコマンド同期完了: {len(synced)} 個のコマンドを登録")
+    except Exception as e:
+        print(f" コマンド同期エラー: {e}")
+
     print(" 高機能管理Bot: 正常稼働開始")
     print("==================================================")
     
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="!help | サーバー監視中"
+            name="/help | サーバー監視中"
         )
     )
 
@@ -178,8 +183,8 @@ async def process_exp(message: discord.Message):
 
     save_data()
 
-@bot.command(name="rank", aliases=["level", "lvl"])
-async def show_rank(ctx, member: discord.Member = None):
+@bot.hybrid_command(name="rank", description="ユーザーのレベルステータスを表示します")
+async def show_rank(ctx: commands.Context, member: Optional[discord.Member] = None):
     member = member or ctx.author
     user_id = str(member.id)
     
@@ -249,9 +254,9 @@ class TicketCloseView(discord.ui.View):
         await asyncio.sleep(5)
         await interaction.channel.delete()
 
-@bot.command(name="setup_ticket")
+@bot.hybrid_command(name="setup_ticket", description="お問い合わせチケットパネルを設置します（管理者専用）")
 @commands.has_permissions(administrator=True)
-async def setup_ticket(ctx):
+async def setup_ticket(ctx: commands.Context):
     embed = discord.Embed(
         title="📩 お問い合わせパネル",
         description="質問・不具合報告・各種申請は下のボタンを押してチケットを発行してください。",
@@ -261,10 +266,10 @@ async def setup_ticket(ctx):
 
 
 # =========================================================
-# 6. 高度なユーザー管理 & サーバー統計機能
+# 6. ユーザー情報 & サーバー統計機能
 # =========================================================
-@bot.command(name="userinfo", aliases=["user", "ui"])
-async def user_info(ctx, member: discord.Member = None):
+@bot.hybrid_command(name="userinfo", description="ユーザーの詳細情報を表示します")
+async def user_info(ctx: commands.Context, member: Optional[discord.Member] = None):
     member = member or ctx.author
     
     roles = [role.mention for role in member.roles if role.name != "@everyone"]
@@ -292,8 +297,8 @@ async def user_info(ctx, member: discord.Member = None):
 
     await ctx.send(embed=embed)
 
-@bot.command(name="serverinfo", aliases=["server", "si"])
-async def server_info(ctx):
+@bot.hybrid_command(name="serverinfo", description="サーバーの統計情報を表示します")
+async def server_info(ctx: commands.Context):
     guild = ctx.guild
     total_members = guild.member_count
     bots = sum(1 for m in guild.members if m.bot)
@@ -337,20 +342,11 @@ async def server_info(ctx):
 
 
 # =========================================================
-# 7. 高度なロール管理機能
+# 7. ロール管理機能
 # =========================================================
-@bot.command(name="addrole", aliases=["roleadd"])
+@bot.hybrid_command(name="addrole", description="メンバーにロールを付与します")
 @commands.has_permissions(manage_roles=True)
-async def add_role(ctx, member: discord.Member, *, role_input: str):
-    role = discord.utils.get(ctx.guild.roles, name=role_input)
-    if not role and role_input.startswith("<@&") and role_input.endswith(">"):
-        role_id = int(role_input[3:-1])
-        role = ctx.guild.get_role(role_id)
-        
-    if not role:
-        await ctx.send(f"❌ エラー: `{role_input}` というロールが見つかりません。")
-        return
-
+async def add_role(ctx: commands.Context, member: discord.Member, role: discord.Role):
     if role.position >= ctx.guild.me.top_role.position:
         await ctx.send("❌ エラー: Botの最上位ロールより高い（または同じ）位置にあるロールは操作できません。")
         return
@@ -368,18 +364,9 @@ async def add_role(ctx, member: discord.Member, *, role_input: str):
     await ctx.send(embed=embed)
     await send_log(ctx.guild, "🛡️ ロール手動付与", f"実行者: {ctx.author.mention}\n対象: {member.mention}\n付与ロール: `{role.name}`")
 
-@bot.command(name="removerole", aliases=["roleremove", "delrole"])
+@bot.hybrid_command(name="removerole", description="メンバーからロールを剥奪します")
 @commands.has_permissions(manage_roles=True)
-async def remove_role(ctx, member: discord.Member, *, role_input: str):
-    role = discord.utils.get(ctx.guild.roles, name=role_input)
-    if not role and role_input.startswith("<@&") and role_input.endswith(">"):
-        role_id = int(role_input[3:-1])
-        role = ctx.guild.get_role(role_id)
-
-    if not role:
-        await ctx.send(f"❌ エラー: `{role_input}` というロールが見つかりません。")
-        return
-
+async def remove_role(ctx: commands.Context, member: discord.Member, role: discord.Role):
     if role.position >= ctx.guild.me.top_role.position:
         await ctx.send("❌ エラー: Botの最上位ロールより高い位置にあるロールは操作できません。")
         return
@@ -397,14 +384,9 @@ async def remove_role(ctx, member: discord.Member, *, role_input: str):
     await ctx.send(embed=embed)
     await send_log(ctx.guild, "🛡️ ロール手動剥奪", f"実行者: {ctx.author.mention}\n対象: {member.mention}\n剥奪ロール: `{role.name}`", discord.Color.orange())
 
-@bot.command(name="roleall")
+@bot.hybrid_command(name="roleall", description="全員に指定のロールを一括付与します（管理者専用）")
 @commands.has_permissions(administrator=True)
-async def role_all(ctx, *, role_input: str):
-    role = discord.utils.get(ctx.guild.roles, name=role_input)
-    if not role:
-        await ctx.send(f"❌ エラー: `{role_input}` というロールが見つかりません。")
-        return
-
+async def role_all(ctx: commands.Context, role: discord.Role):
     msg = await ctx.send(f"🔄 **{role.name}** を全一般メンバー（Bot除く）に一括付与しています... 少々お待ちください。")
     count = 0
     for member in ctx.guild.members:
@@ -419,8 +401,8 @@ async def role_all(ctx, *, role_input: str):
     await msg.edit(content=f"✅ 処理完了: 計 **{count}** 名のメンバーに `{role.name}` ロールを一括付与しました。")
     await send_log(ctx.guild, "🛡️ ロール一括付与", f"実行者: {ctx.author.mention}\n対象人数: {count}名\n対象ロール: `{role.name}`")
 
-@bot.command(name="roles", aliases=["rolelist"])
-async def list_roles(ctx):
+@bot.hybrid_command(name="roles", description="サーバー内のロール一覧を表示します")
+async def list_roles(ctx: commands.Context):
     roles = sorted([r for r in ctx.guild.roles if r.name != "@everyone"], key=lambda r: r.position, reverse=True)
     
     if not roles:
@@ -443,11 +425,11 @@ async def list_roles(ctx):
 
 
 # =========================================================
-# 8. モデレーション機能 (Kick, Ban, Mute, Clear)
+# 8. モデレーション機能 (Kick, Ban, Timeout, Clear)
 # =========================================================
-@bot.command(name="clear", aliases=["purge", "clean"])
+@bot.hybrid_command(name="clear", description="メッセージを指定件数削除します")
 @commands.has_permissions(manage_messages=True)
-async def clear_messages(ctx, amount: int = 10):
+async def clear_messages(ctx: commands.Context, amount: int = 10):
     if amount < 1:
         await ctx.send("❌ 1以上の数値を指定してください。")
         return
@@ -472,9 +454,9 @@ async def clear_messages(ctx, amount: int = 10):
     except discord.NotFound:
         pass
 
-@bot.command(name="kick")
+@bot.hybrid_command(name="kick", description="指定したメンバーをキックします")
 @commands.has_permissions(kick_members=True)
-async def kick_member(ctx, member: discord.Member, *, reason: str = "理由なし"):
+async def kick_member(ctx: commands.Context, member: discord.Member, reason: str = "理由なし"):
     if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
         await ctx.send("❌ 自分と同等以上の権限を持つメンバーをキックすることはできません。")
         return
@@ -491,9 +473,9 @@ async def kick_member(ctx, member: discord.Member, *, reason: str = "理由な�
     except Exception as e:
         await ctx.send(f"❌ キック処理に失敗しました: {e}")
 
-@bot.command(name="ban")
+@bot.hybrid_command(name="ban", description="指定したユーザーをBANします")
 @commands.has_permissions(ban_members=True)
-async def ban_member(ctx, user: Union[discord.Member, discord.User], *, reason: str = "理由なし"):
+async def ban_member(ctx: commands.Context, user: discord.User, reason: str = "理由なし"):
     try:
         await ctx.guild.ban(user, reason=reason)
         embed = discord.Embed(
@@ -506,9 +488,9 @@ async def ban_member(ctx, user: Union[discord.Member, discord.User], *, reason: 
     except Exception as e:
         await ctx.send(f"❌ BAN処理に失敗しました: {e}")
 
-@bot.command(name="timeout", aliases=["mute"])
+@bot.hybrid_command(name="timeout", description="指定したメンバーをタイムアウト（ミュート）します")
 @commands.has_permissions(moderate_members=True)
-async def timeout_member(ctx, member: discord.Member, minutes: int = 10, *, reason: str = "理由なし"):
+async def timeout_member(ctx: commands.Context, member: discord.Member, minutes: int = 10, reason: str = "理由なし"):
     if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
         await ctx.send("❌ 自分と同等以上の権限を持つメンバーをタイムアウトすることはできません。")
         return
@@ -563,36 +545,36 @@ async def on_message(message):
 # =========================================================
 # 10. ヘルプ & エラーハンドリング & 起動メイン処理
 # =========================================================
-@bot.command(name="help")
-async def custom_help(ctx):
+@bot.hybrid_command(name="help", description="利用可能なコマンド一覧を表示します")
+async def custom_help(ctx: commands.Context):
     embed = discord.Embed(
         title="🤖 Bot コマンドヘルプ一覧",
-        description="利用可能なコマンドの一覧です。",
+        description="すべてのコマンドは `/` (スラッシュコマンド) および `!` の両方で利用可能です。",
         color=discord.Color.blue(),
         timestamp=datetime.utcnow()
     )
 
     embed.add_field(
         name="👤 ユーザー・レベル機能",
-        value="`!userinfo` : ユーザー情報\n`!serverinfo` : サーバー統計\n`!rank` : レベル確認\n`!ping` : 応答速度",
+        value="`/userinfo` : ユーザー情報\n`/serverinfo` : サーバー統計\n`/rank` : レベル確認\n`/ping` : 応答速度",
         inline=False
     )
     embed.add_field(
         name="🛡️ ロール・チケット管理",
-        value="`!addrole` / `!removerole` : ロール操作\n`!roleall` : 一括ロール付与\n`!roles` : ロール一覧\n`!setup_ticket` : チケット設置",
+        value="`/addrole` / `/removerole` : ロール操作\n`/roleall` : 一括ロール付与\n`/roles` : ロール一覧\n`/setup_ticket` : チケット設置",
         inline=False
     )
     embed.add_field(
         name="👞 モデレーション",
-        value="`!clear [件数]` : メッセージ削除\n`!timeout` : タイムアウト\n`!kick` / `!ban` : キック・BAN",
+        value="`/clear [件数]` : メッセージ削除\n`/timeout` : タイムアウト\n`/kick` / `/ban` : キック・BAN",
         inline=False
     )
 
     embed.set_footer(text=f"実行者: {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
 
-@bot.command(name="ping")
-async def ping_check(ctx):
+@bot.hybrid_command(name="ping", description="Botの応答速度を確認します")
+async def ping_check(ctx: commands.Context):
     latency = round(bot.latency * 1000)
     await ctx.send(f"🏓 Pong! レイテンシ: **{latency} ms**")
 
@@ -603,15 +585,13 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.MissingPermissions):
         await ctx.send("🚫 このコマンドを実行する権限が不足しています。")
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"⚠️ 引数が不足しています。`!help` を確認してください。")
+        await ctx.send("⚠️ 引数が不足しています。`/help` を確認してください。")
     else:
         print(f"エラー発生: {error}", file=sys.stderr)
 
 if __name__ == "__main__":
-    # Webサーバーを先に別スレッドで立ち上げる
     keep_alive()
     
-    # Discord Botの起動
     TOKEN = os.getenv("DISCORD_TOKEN")
     if TOKEN:
         try:
