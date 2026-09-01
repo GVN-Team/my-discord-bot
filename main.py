@@ -1,601 +1,510 @@
-import os
-import sys
-import json
-import asyncio
-from datetime import datetime, timedelta
-from typing import Optional, Dict
-from threading import Thread
-from flask import Flask
-
+import uuid
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-# =========================================================
-# 1. 常時稼働用 Webサーバー設定 (Flask)
-# =========================================================
-app = Flask('')
+# ----------------------------------------------------
+# 簡易データベース (メモリ保持)
+# ----------------------------------------------------
+# vending_machines = {
+#     "uuid": {
+#         "name": "自販機名",
+#         "items": {
+#             "item_id": {
+#                 "name": "商品名", "type": "有限"/"無限",
+#                 "money": 100, "manera": 100,
+#                 "description": "説明", "emoji": "🍎", "stock": 10
+#             }
+#         }
+#     }
+# }
+vending_machines = {}
 
-@app.route('/')
-def home():
-    return "Bot is running!"
-
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run_web)
-    t.start()
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# =========================================================
-# 2. Bot基本設定とIntents（権限）
-# =========================================================
-intents = discord.Intents.all()
-client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
+# ----------------------------------------------------
+# 動的【検知】用 Autocomplete (自販機名・商品名)
+# ----------------------------------------------------
+async def vending_machine_autocomplete(
+    interaction: discord.Interaction, current: str
+):
+  return [
+      app_commands.Choice(name=data["name"], value=v_id)
+      for v_id, data in vending_machines.items()
+      if current.lower() in data["name"].lower()
+  ][:25]
 
-# 定数設定
-LOG_CHANNEL_NAME = "bot-log"
-WELCOME_CHANNEL_NAME = "welcome"
-TICKET_CATEGORY_NAME = "🎫-チケット"
-AUTO_ROLE_NAME = "メンバー"
-DATA_FILE = "user_data.json"
 
-# 簡易データ保存（レベル・発言数管理用）
-user_data: Dict[str, Dict[str, int]] = {}
+# ----------------------------------------------------
+# UIコンポーネント (モーダル・ボタン・ドロップダウン)
+# ----------------------------------------------------
 
-def load_data():
-    global user_data
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                user_data = json.load(f)
-        except Exception:
-            user_data = {}
 
-def save_data():
+# モーダル: 商品購入フォーム 〔自入力〕
+class PurchaseModal(discord.ui.Modal, title="商品購入"):
+  quantity = discord.ui.TextInput(
+      label="個数*",
+      placeholder="購入数を入力",
+      required=True,
+      style=discord.TextStyle.short,
+  )
+  paypay_link = discord.ui.TextInput(
+      label="PayPay送金リンク*",
+      placeholder="PayPayのリンクを入力",
+      required=True,
+      style=discord.TextStyle.short,
+  )
+
+  def __init__(self, payment_method: str):
+    super().__init__()
+    self.payment_method = payment_method
+
+  async def on_submit(self, interaction: discord.Interaction):
+    await interaction.response.send_message(
+        f"購入申請を受け付けました。\n決済方法: {self.payment_method}\n個数:"
+        f" {self.quantity.value}\nリンク: {self.paypay_link.value}",
+        ephemeral=True,
+    )
+
+
+# ドロップダウン: 決済方法選択 〔リスト〕
+class PaymentSelect(discord.ui.Select):
+
+  def __init__(self):
+    options = [
+        discord.SelectOption(
+            label="マネー", value="マネー", description="マネーで決済"
+        ),
+        discord.SelectOption(
+            label="マネーライト",
+            value="マネーライト",
+            description="マネーライトで決済",
+        ),
+    ]
+    super().__init__(
+        placeholder="決済方法を選択してください",
+        min_values=1,
+        max_values=1,
+        options=options,
+    )
+
+  async def callback(self, interaction: discord.Interaction):
+    selected = self.values[0]
+    await interaction.response.send_modal(PurchaseModal(payment_method=selected))
+
+
+# モーダル: 商品内容変更 〔自入力〕
+class EditItemModal(discord.ui.Modal, title="商品内容変更"):
+
+  def __init__(self, v_id: str, item_id: str, current_item: dict):
+    super().__init__()
+    self.v_id = v_id
+    self.item_id = item_id
+
+    self.item_name = discord.ui.TextInput(
+        label="商品名*", default=current_item["name"], required=True
+    )
+    self.description = discord.ui.TextInput(
+        label="説明文",
+        default=current_item.get("description", ""),
+        required=False,
+    )
+    self.item_type = discord.ui.TextInput(
+        label="タイプ(有限か無限以外だったらエラー)*",
+        default=current_item["type"],
+        required=True,
+    )
+    self.money = discord.ui.TextInput(
+        label="マネー*", default=str(current_item["money"]), required=True
+    )
+    self.manera = discord.ui.TextInput(
+        label="マネーライト*", default=str(current_item["manera"]), required=True
+    )
+
+    self.add_item(self.item_name)
+    self.add_item(self.description)
+    self.add_item(self.item_type)
+    self.add_item(self.money)
+    self.add_item(self.manera)
+
+  async def on_submit(self, interaction: discord.Interaction):
+    if self.item_type.value not in ["有限", "無限"]:
+      await interaction.response.send_message(
+          "エラー: タイプは「有限」または「無限」で入力してください。",
+          ephemeral=True,
+      )
+      return
+
     try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(user_data, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        print(f"データ保存エラー: {e}")
+      m_val = int(self.money.value)
+      ml_val = int(self.manera.value)
+    except ValueError:
+      await interaction.response.send_message(
+          "エラー: マネー・マネーライトは数値で入力してください。",
+          ephemeral=True,
+      )
+      return
 
-load_data()
+    item = vending_machines[self.v_id]["items"][self.item_id]
+    item["name"] = self.item_name.value
+    item["description"] = self.description.value
+    item["type"] = self.item_type.value
+    item["money"] = m_val
+    item["manera"] = ml_val
+
+    await interaction.response.send_message(
+        f"商品「{self.item_name.value}」の内容を更新しました。",
+        ephemeral=True,
+    )
 
 
-# =========================================================
-# 3. イベント＆スラッシュコマンド同期
-# =========================================================
-@client.event
+# ドロップダウン: 変更対象商品選択 【検知(選択した自販機の中にある商品名)】
+class EditItemSelect(discord.ui.Select):
+
+  def __init__(self, v_id: str):
+    self.v_id = v_id
+    items = vending_machines[v_id]["items"]
+    options = [
+        discord.SelectOption(
+            label=data["name"], value=i_id, emoji=data.get("emoji")
+        )
+        for i_id, data in items.items()
+    ]
+    super().__init__(
+        placeholder="内容を変更する商品を選択してください",
+        min_values=1,
+        max_values=1,
+        options=options,
+    )
+
+  async def callback(self, interaction: discord.Interaction):
+    item_id = self.values[0]
+    item = vending_machines[self.v_id]["items"][item_id]
+    await interaction.response.send_modal(
+        EditItemModal(self.v_id, item_id, item)
+    )
+
+
+# ドロップダウン: 削除対象商品選択 【検知(選択した自販機の中にある商品名)】
+class DeleteItemSelect(discord.ui.Select):
+
+  def __init__(self, v_id: str):
+    self.v_id = v_id
+    items = vending_machines[v_id]["items"]
+    options = [
+        discord.SelectOption(
+            label=data["name"], value=i_id, emoji=data.get("emoji")
+        )
+        for i_id, data in items.items()
+    ]
+    super().__init__(
+        placeholder="削除する商品を選択してください",
+        min_values=1,
+        max_values=1,
+        options=options,
+    )
+
+  async def callback(self, interaction: discord.Interaction):
+    item_id = self.values[0]
+    item_name = vending_machines[self.v_id]["items"][item_id]["name"]
+
+    view = discord.ui.View()
+
+    # 〔button〕{赤色}削除
+    confirm_btn = discord.ui.Button(
+        label="削除", style=discord.ButtonStyle.danger
+    )
+    # 〔button〕{#36363B}キャンセル
+    cancel_btn = discord.ui.Button(
+        label="キャンセル", style=discord.ButtonStyle.secondary
+    )
+
+    async def confirm_callback(inter: discord.Interaction):
+      del vending_machines[self.v_id]["items"][item_id]
+      await inter.response.edit_message(
+          content=f"選択した商品「{item_name}」を削除しました。", view=None
+      )
+
+    async def cancel_callback(inter: discord.Interaction):
+      await inter.response.edit_message(content="処理をキャンセルしました。", view=None)
+
+    confirm_btn.callback = confirm_callback
+    cancel_btn.callback = cancel_callback
+
+    view.add_item(confirm_btn)
+    view.add_item(cancel_btn)
+
+    await interaction.response.send_message(
+        f"本当に削除しますか？\n実行した場合この操作は取り消せません。",
+        view=view,
+        ephemeral=True,
+    )
+
+
+# ----------------------------------------------------
+# スラッシュコマンド定義
+# ----------------------------------------------------
+
+
+@bot.event
 async def on_ready():
-    print("==================================================")
-    print(f" ログイン完了: {client.user.name} (ID: {client.user.id})")
-    print(f" 参加サーバー数: {len(client.guilds)}")
-    
-    # スラッシュコマンドをDiscordに同期
-    try:
-        synced = await tree.sync()
-        print(f" スラッシュコマンド同期完了: {len(synced)} 個のコマンドを登録")
-    except Exception as e:
-        print(f" コマンド同期エラー: {e}")
+  await bot.tree.sync()
+  print(f"ログイン完了: {bot.user}")
 
-    print(" 高機能管理Bot: 正常稼働開始")
-    print("==================================================")
-    
-    await client.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name="/help | サーバー監視中"
-        )
+
+# /自販機作成
+@bot.tree.command(name="自販機作成", description="自販機を作成")
+@app_commands.describe(name="自販機の名前")
+async def create_vending_machine(
+    interaction: discord.Interaction, name: str
+):
+  # ランダムな長いIDを発行 (例: abcdefg-1123456-a1b2c3d4 代替)
+  v_id = str(uuid.uuid4())
+  vending_machines[v_id] = {"name": name, "items": {}}
+
+  await interaction.response.send_message(
+      f"自販機「{name}」を作成しました。(ID: `{v_id}`)", ephemeral=True
+  )
+
+
+# /自販機削除
+@bot.tree.command(
+    name="自販機削除", description="自販機を完全に削除します。"
+)
+@app_commands.describe(vending_machine_id="削除する自販機")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+async def delete_vending_machine(
+    interaction: discord.Interaction, vending_machine_id: str
+):
+  if vending_machine_id not in vending_machines:
+    await interaction.response.send_message(
+        "指定された自販機が見つかりません。", ephemeral=True
+    )
+    return
+
+  target_name = vending_machines[vending_machine_id]["name"]
+
+  # 〔自販機〕パネル作成
+  embed = discord.Embed(
+      title="# 自販機削除確認",  # (((自販機削除確認)))
+      description=(
+          f"本当に自販機「{target_name}」を削除しますか？\n**この操作は取り消せません。\nすべての商品と在庫のデータも削除されます。**"
+      ),
+      color=discord.Color.red(),
+  )
+
+  view = discord.ui.View()
+  # 〔button〕{赤色}削除する
+  delete_btn = discord.ui.Button(
+      label="削除する", style=discord.ButtonStyle.danger
+  )
+  # 〔button〕{#36363B}キャンセル
+  cancel_btn = discord.ui.Button(
+      label="キャンセル", style=discord.ButtonStyle.secondary
+  )
+
+  async def delete_cb(inter: discord.Interaction):
+    del vending_machines[vending_machine_id]
+    await inter.response.edit_message(
+        content=f"自販機「{target_name}」を完全に削除しました。",
+        embed=None,
+        view=None,
     )
 
-async def send_log(guild: discord.Guild, title: str, description: str, color: discord.Color = discord.Color.blue()):
-    channel = discord.utils.get(guild.text_channels, name=LOG_CHANNEL_NAME)
-    if channel:
-        embed = discord.Embed(
-            title=title,
-            description=description,
-            color=color,
-            timestamp=datetime.utcnow()
-        )
-        await channel.send(embed=embed)
+  async def cancel_cb(inter: discord.Interaction):
+    await inter.response.edit_message(content="削除をキャンセルしました。", embed=None, view=None)
 
-@client.event
-async def on_member_join(member: discord.Member):
-    guild = member.guild
-    role = discord.utils.get(guild.roles, name=AUTO_ROLE_NAME)
-    if role:
-        try:
-            await member.add_roles(role)
-        except discord.Forbidden:
-            pass
+  delete_btn.callback = delete_cb
+  cancel_btn.callback = cancel_cb
 
-    welcome_ch = discord.utils.get(guild.text_channels, name=WELCOME_CHANNEL_NAME)
-    if welcome_ch:
-        embed = discord.Embed(
-            title="🎉 メンバーが参加しました！",
-            description=f"{member.mention} さん、**{guild.name}** へようこそ！",
-            color=discord.Color.green()
-        )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="アカウント作成日", value=member.created_at.strftime("%Y/%m/%d %H:%M"))
-        await welcome_ch.send(embed=embed)
+  view.add_item(delete_btn)
+  view.add_item(cancel_btn)
 
-    desc = f"👤 {member.mention} ({member.name})\n**ID:** `{member.id}`\n**作成日:** {member.created_at.strftime('%Y/%m/%d %H:%M:%S')}"
-    await send_log(guild, "📥 メンバー参加", desc, discord.Color.green())
-
-@client.event
-async def on_member_remove(member: discord.Member):
-    guild = member.guild
-    desc = f"📤 {member.mention} ({member.name})\n**ID:** `{member.id}`"
-    await send_log(guild, "🚪 メンバー脱退", desc, discord.Color.red())
-
-@client.event
-async def on_message_delete(message: discord.Message):
-    if message.author.bot or not message.guild:
-        return
-    desc = f"**送信者:** {message.author.mention}\n**チャンネル:** {message.channel.mention}\n**削除された内容:**\n```{message.content}```"
-    await send_log(message.guild, "🗑️ メッセージ削除検知", desc, discord.Color.gold())
-
-@client.event
-async def on_message_edit(before: discord.Message, after: discord.Message):
-    if before.author.bot or not before.guild or before.content == after.content:
-        return
-    desc = f"**編集者:** {before.author.mention}\n**チャンネル:** {before.channel.mention}\n**変更前:**\n```{before.content}```\n**変更後:**\n```{after.content}```"
-    await send_log(before.guild, "✏️ メッセージ編集検知", desc, discord.Color.blue())
+  await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-# =========================================================
-# 4. 発言カウンター & レベルアップシステム
-# =========================================================
-async def process_exp(message: discord.Message):
-    user_id = str(message.author.id)
-    if user_id not in user_data:
-        user_data[user_id] = {"exp": 0, "level": 1, "messages": 0}
-
-    user_data[user_id]["messages"] += 1
-    user_data[user_id]["exp"] += 5
-    
-    current_exp = user_data[user_id]["exp"]
-    current_level = user_data[user_id]["level"]
-    next_level_exp = current_level * 50
-
-    if current_exp >= next_level_exp:
-        user_data[user_id]["level"] += 1
-        new_level = user_data[user_id]["level"]
-        await message.channel.send(f"🎊 {message.author.mention} さんが **レベル {new_level}** にレベルアップしました！")
-        
-        if new_level >= 5:
-            rank_role = discord.utils.get(message.guild.roles, name="アクティブメンバー")
-            if rank_role and rank_role not in message.author.roles:
-                try:
-                    await message.author.add_roles(rank_role)
-                    await message.channel.send(f"🏅 レベル到達特典として `{rank_role.name}` ロールを付与しました！")
-                except discord.Forbidden:
-                    pass
-
-    save_data()
-
-@tree.command(name="rank", description="ユーザーのレベルステータスを表示します")
-@app_commands.describe(member="確認したいメンバー（未指定の場合は自分）")
-async def show_rank(interaction: discord.Interaction, member: Optional[discord.Member] = None):
-    target = member or interaction.user
-    user_id = str(target.id)
-    
-    if user_id not in user_data:
-        await interaction.response.send_message(f"⚠️ {target.display_name} のレベルデータはまだありません。", ephemeral=True)
-        return
-
-    data = user_data[user_id]
-    lvl = data["level"]
-    exp = data["exp"]
-    next_exp = lvl * 50
-    msgs = data["messages"]
-
-    embed = discord.Embed(title=f"📊 {target.display_name} のレベルステータス", color=discord.Color.purple())
-    embed.set_thumbnail(url=target.display_avatar.url)
-    embed.add_field(name="現在のレベル", value=f"**Lv. {lvl}**", inline=True)
-    embed.add_field(name="経験値 (EXP)", value=f"{exp} / {next_exp}", inline=True)
-    embed.add_field(name="通算発言数", value=f"{msgs} 回", inline=True)
-    
-    await interaction.response.send_message(embed=embed)
-
-
-# =========================================================
-# 5. お問い合わせ（チケット）機能
-# =========================================================
-class TicketView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="🎫 チケットを開く", style=discord.ButtonStyle.primary, custom_id="create_ticket_btn")
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        category = discord.utils.get(guild.categories, name=TICKET_CATEGORY_NAME)
-        
-        if not category:
-            category = await guild.create_category(TICKET_CATEGORY_NAME)
-
-        channel_name = f"ticket-{interaction.user.name}".lower().replace(" ", "-")
-        existing_channel = discord.utils.get(guild.text_channels, name=channel_name)
-        if existing_channel:
-            await interaction.response.send_message(f"⚠️ 既にチケットが存在します: {existing_channel.mention}", ephemeral=True)
-            return
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-
-        ticket_ch = await guild.create_text_channel(name=channel_name, category=category, overwrites=overwrites)
-        
-        close_view = TicketCloseView()
-        embed = discord.Embed(
-            title="🎫 サポートチケット",
-            description=f"{interaction.user.mention} さん、お問い合わせ内容を入力してください。\nサポートスタッフが対応します。\n用件が終わったら下のボタンで閉じられます。",
-            color=discord.Color.blue()
-        )
-        await ticket_ch.send(embed=embed, view=close_view)
-        await interaction.response.send_message(f"✅ チケットを作成しました: {ticket_ch.mention}", ephemeral=True)
-
-class TicketCloseView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="🔒 チケットを閉じる", style=discord.ButtonStyle.danger, custom_id="close_ticket_btn")
-    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("🔒 このチケットを5秒後に削除します...")
-        await asyncio.sleep(5)
-        await interaction.channel.delete()
-
-@tree.command(name="setup_ticket", description="お問い合わせチケットパネルを設置します（管理者専用）")
-@app_commands.checks.has_permissions(administrator=True)
-async def setup_ticket(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📩 お問い合わせパネル",
-        description="質問・不具合報告・各種申請は下のボタンを押してチケットを発行してください。",
-        color=discord.Color.green()
+# /自販機設置
+@bot.tree.command(name="自販機設置", description="自販機を設置します")
+@app_commands.describe(
+    vending_machine_id="設置する自販機",
+    panel_title="パネルのタイトル",
+    panel_description="パネルの説明文",
+)
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+async def place_vending_machine(
+    interaction: discord.Interaction,
+    vending_machine_id: str,
+    panel_title: str = None,
+    panel_description: str = None,
+):
+  if vending_machine_id not in vending_machines:
+    await interaction.response.send_message(
+        "指定された自販機が見つかりません。", ephemeral=True
     )
-    await interaction.channel.send(embed=embed, view=TicketView())
-    await interaction.response.send_message("✅ チケットパネルを設置しました。", ephemeral=True)
+    return
 
+  vm_data = vending_machines[vending_machine_id]
+  title = panel_title if panel_title else vm_data["name"]
 
-# =========================================================
-# 6. ユーザー情報 & サーバー統計機能
-# =========================================================
-@tree.command(name="userinfo", description="ユーザーの詳細情報を表示します")
-@app_commands.describe(member="情報を表示したいメンバー")
-async def user_info(interaction: discord.Interaction, member: Optional[discord.Member] = None):
-    target = member or interaction.user
-    
-    roles = [role.mention for role in target.roles if role.name != "@everyone"]
-    roles_str = ", ".join(roles) if roles else "なし"
-    
-    permissions = [perm.replace("_", " ").title() for perm, value in target.guild_permissions if value]
-    perm_str = ", ".join(permissions[:8]) if permissions else "一般的な権限"
-    if len(permissions) > 8:
-        perm_str += f" 他 {len(permissions) - 8} 個"
+  # 〔自販機〕〔横線色〕{黄緑} (#8A2BE2/緑系)
+  embed = discord.Embed(title=title, color=discord.Color.green())
 
-    embed = discord.Embed(
-        title=f"👤 ユーザー詳細情報 - {target.display_name}",
-        color=target.color if target.color != discord.Color.default() else discord.Color.blue(),
-        timestamp=datetime.utcnow()
+  # 説明文の設定 (指定がない場合は追加せず改行も発生させない)
+  if panel_description:
+    embed.description = panel_description
+
+  # その自販機の中にある商品全てを縦に並べて表示
+  for item_id, item in vm_data["items"].items():
+    field_value = (
+        f"マネー:{item['money']}マネーライト:{item['manera']}"
     )
-    embed.set_thumbnail(url=target.display_avatar.url)
-    embed.add_field(name="ユーザー名", value=f"{target.name}", inline=True)
-    embed.add_field(name="ユーザーID", value=f"`{target.id}`", inline=True)
-    embed.add_field(name="アカウント種別", value="Bot" if target.bot else "ユーザー", inline=True)
-    embed.add_field(name="アカウント作成日時", value=target.created_at.strftime("%Y/%m/%d %H:%M:%S"), inline=False)
-    embed.add_field(name="サーバー参加日時", value=target.joined_at.strftime("%Y/%m/%d %H:%M:%S"), inline=False)
-    embed.add_field(name=f"保有ロール ({len(roles)})", value=roles_str, inline=False)
-    embed.add_field(name="主な所持権限", value=f"```{perm_str}```", inline=False)
-    embed.set_footer(text=f"実行者: {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
+    if item.get("description"):
+      field_value = f"{item['description']}\n" + field_value
 
-    await interaction.response.send_message(embed=embed)
-
-@tree.command(name="serverinfo", description="サーバーの統計情報を表示します")
-async def server_info(interaction: discord.Interaction):
-    guild = interaction.guild
-    total_members = guild.member_count
-    bots = sum(1 for m in guild.members if m.bot)
-    humans = total_members - bots
-    
-    text_channels = len(guild.text_channels)
-    voice_channels = len(guild.voice_channels)
-    categories = len(guild.categories)
-    roles_count = len(guild.roles)
-
-    embed = discord.Embed(
-        title=f"🏰 {guild.name} サーバー統計情報",
-        color=discord.Color.gold(),
-        timestamp=datetime.utcnow()
-    )
-    if guild.icon:
-        embed.set_thumbnail(url=guild.icon.url)
-        
-    embed.add_field(name="サーバーID", value=f"`{guild.id}`", inline=True)
-    embed.add_field(name="サーバー所有者", value=f"{guild.owner.mention}", inline=True)
-    embed.add_field(name="開設日時", value=guild.created_at.strftime("%Y/%m/%d %H:%M"), inline=True)
-    
+    emoji_str = f"{item['emoji']} " if item.get("emoji") else ""
     embed.add_field(
-        name=f"👥 メンバー構成 ({total_members}名)",
-        value=f"└ ユーザー: **{humans}** 名\n└ Bot: **{bots}** つ",
-        inline=True
-    )
-    embed.add_field(
-        name="💬 チャンネル構成",
-        value=f"└ テキスト: **{text_channels}**\n└ ボイス: **{voice_channels}**\n└ カテゴリ: **{categories}**",
-        inline=True
-    )
-    embed.add_field(
-        name="🛡️ その他データ",
-        value=f"└ ロール数: **{roles_count}**\n└ ブースト数: **{guild.premium_subscription_count}**",
-        inline=True
-    )
-    embed.set_footer(text=f"Requested by {interaction.user.name}")
-
-    await interaction.response.send_message(embed=embed)
-
-
-# =========================================================
-# 7. ロール管理機能
-# =========================================================
-@tree.command(name="addrole", description="メンバーにロールを付与します")
-@app_commands.describe(member="対象メンバー", role="付与するロール")
-@app_commands.checks.has_permissions(manage_roles=True)
-async def add_role(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
-    if role.position >= interaction.guild.me.top_role.position:
-        await interaction.response.send_message("❌ エラー: Botの最上位ロールより高い（または同じ）位置にあるロールは操作できません。", ephemeral=True)
-        return
-
-    if role in member.roles:
-        await interaction.response.send_message(f"⚠️ {member.mention} は既に `{role.name}` ロールを保持しています。", ephemeral=True)
-        return
-
-    await member.add_roles(role)
-    embed = discord.Embed(
-        title="✅ ロール付与完了",
-        description=f"{member.mention} に `{role.name}` ロールを付与しました。",
-        color=discord.Color.green()
-    )
-    await interaction.response.send_message(embed=embed)
-    await send_log(interaction.guild, "🛡️ ロール手動付与", f"実行者: {interaction.user.mention}\n対象: {member.mention}\n付与ロール: `{role.name}`")
-
-@tree.command(name="removerole", description="メンバーからロールを剥奪します")
-@app_commands.describe(member="対象メンバー", role="剥奪するロール")
-@app_commands.checks.has_permissions(manage_roles=True)
-async def remove_role(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
-    if role.position >= interaction.guild.me.top_role.position:
-        await interaction.response.send_message("❌ エラー: Botの最上位ロールより高い位置にあるロールは操作できません。", ephemeral=True)
-        return
-
-    if role not in member.roles:
-        await interaction.response.send_message(f"⚠️ {member.mention} は `{role.name}` ロールを持っていません。", ephemeral=True)
-        return
-
-    await member.remove_roles(role)
-    embed = discord.Embed(
-        title="🗑️ ロール削除完了",
-        description=f"{member.mention} から `{role.name}` ロールを剥奪しました。",
-        color=discord.Color.orange()
-    )
-    await interaction.response.send_message(embed=embed)
-    await send_log(interaction.guild, "🛡️ ロール手動剥奪", f"実行者: {interaction.user.mention}\n対象: {member.mention}\n剥奪ロール: `{role.name}`", discord.Color.orange())
-
-@tree.command(name="roleall", description="全員に指定のロールを一括付与します（管理者専用）")
-@app_commands.describe(role="付与するロール")
-@app_commands.checks.has_permissions(administrator=True)
-async def role_all(interaction: discord.Interaction, role: discord.Role):
-    await interaction.response.send_message(f"🔄 **{role.name}** を全一般メンバー（Bot除く）に一括付与しています... 少々お待ちください。")
-    count = 0
-    for member in interaction.guild.members:
-        if not member.bot and role not in member.roles:
-            try:
-                await member.add_roles(role)
-                count += 1
-                await asyncio.sleep(0.5)
-            except Exception:
-                continue
-
-    await interaction.followup.send(f"✅ 処理完了: 計 **{count}** 名のメンバーに `{role.name}` ロールを一括付与しました。")
-    await send_log(interaction.guild, "🛡️ ロール一括付与", f"実行者: {interaction.user.mention}\n対象人数: {count}名\n対象ロール: `{role.name}`")
-
-@tree.command(name="roles", description="サーバー内のロール一覧を表示します")
-async def list_roles(interaction: discord.Interaction):
-    roles = sorted([r for r in interaction.guild.roles if r.name != "@everyone"], key=lambda r: r.position, reverse=True)
-    
-    if not roles:
-        await interaction.response.send_message("現在カスタムロールはありません。", ephemeral=True)
-        return
-
-    description_lines = []
-    for r in roles[:20]:
-        description_lines.append(f"• {r.mention} — **{len(r.members)}** 名 (ID: `{r.id}`)")
-
-    embed = discord.Embed(
-        title=f"📜 {interaction.guild.name} のロール一覧",
-        description="\n".join(description_lines),
-        color=discord.Color.blue()
-    )
-    if len(roles) > 20:
-        embed.set_footer(text=f"他 {len(roles) - 20} 個のロールが存在します。")
-
-    await interaction.response.send_message(embed=embed)
-
-
-# =========================================================
-# 8. モデレーション機能 (Kick, Ban, Timeout, Clear)
-# =========================================================
-@tree.command(name="clear", description="メッセージを指定件数削除します")
-@app_commands.describe(amount="削除するメッセージ数（1〜100）")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def clear_messages(interaction: discord.Interaction, amount: int = 10):
-    if amount < 1:
-        await interaction.response.send_message("❌ 1以上の数値を指定してください。", ephemeral=True)
-        return
-    
-    if amount > 100:
-        amount = 100
-
-    await interaction.response.defer(ephemeral=True)
-    deleted = await interaction.channel.purge(limit=amount)
-    
-    await interaction.followup.send(f"🧹 **{len(deleted)}** 件のメッセージを削除しました。")
-    await send_log(
-        interaction.guild, 
-        "🧹 メッセージ一括削除", 
-        f"実行者: {interaction.user.mention}\n実行チャンネル: {interaction.channel.mention}\n削除件数: {len(deleted)}件",
-        discord.Color.gold()
+        name=f"{emoji_str}{item['name']}", value=field_value, inline=False
     )
 
-@tree.command(name="kick", description="指定したメンバーをキックします")
-@app_commands.describe(member="対象メンバー", reason="理由")
-@app_commands.checks.has_permissions(kick_members=True)
-async def kick_member(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
-    if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
-        await interaction.response.send_message("❌ 自分と同等以上の権限を持つメンバーをキックすることはできません。", ephemeral=True)
-        return
+  view = discord.ui.View()
+  # 〔button〕{黄緑}🛒購入する
+  buy_btn = discord.ui.Button(
+      label="🛒購入する", style=discord.ButtonStyle.success
+  )
+  # 〔button〕{赤色}在庫確認
+  stock_btn = discord.ui.Button(
+      label="在庫確認", style=discord.ButtonStyle.danger
+  )
 
-    try:
-        await member.kick(reason=reason)
-        embed = discord.Embed(
-            title="👞 メンバーをキックしました",
-            description=f"対象: {member.mention}\n理由: {reason}",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-        await send_log(interaction.guild, "👞 Kick実行", f"実行者: {interaction.user.mention}\n対象: {member.mention} (`{member.id}`)\n理由: {reason}", discord.Color.red())
-    except Exception as e:
-        await interaction.response.send_message(f"❌ キック処理に失敗しました: {e}", ephemeral=True)
-
-@tree.command(name="ban", description="指定したユーザーをBANします")
-@app_commands.describe(user="対象ユーザー", reason="理由")
-@app_commands.checks.has_permissions(ban_members=True)
-async def ban_member(interaction: discord.Interaction, user: discord.User, reason: str = "理由なし"):
-    try:
-        await interaction.guild.ban(user, reason=reason)
-        embed = discord.Embed(
-            title="🔨 メンバーをBANしました",
-            description=f"対象: {user.mention}\n理由: {reason}",
-            color=discord.Color.dark_red()
-        )
-        await interaction.response.send_message(embed=embed)
-        await send_log(interaction.guild, "🔨 BAN実行", f"実行者: {interaction.user.mention}\n対象: {user.mention} (`{user.id}`)\n理由: {reason}", discord.Color.dark_red())
-    except Exception as e:
-        await interaction.response.send_message(f"❌ BAN処理に失敗しました: {e}", ephemeral=True)
-
-@tree.command(name="timeout", description="指定したメンバーをタイムアウト（ミュート）します")
-@app_commands.describe(member="対象メンバー", minutes="タイムアウト時間（分）", reason="理由")
-@app_commands.checks.has_permissions(moderate_members=True)
-async def timeout_member(interaction: discord.Interaction, member: discord.Member, minutes: int = 10, reason: str = "理由なし"):
-    if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
-        await interaction.response.send_message("❌ 自分と同等以上の権限を持つメンバーをタイムアウトすることはできません。", ephemeral=True)
-        return
-
-    duration = timedelta(minutes=minutes)
-    try:
-        await member.timeout(duration, reason=reason)
-        embed = discord.Embed(
-            title="🤐 タイムアウトを設定しました",
-            description=f"対象: {member.mention}\n期間: **{minutes}** 分間\n理由: {reason}",
-            color=discord.Color.dark_gold()
-        )
-        await interaction.response.send_message(embed=embed)
-        await send_log(interaction.guild, "🤐 タイムアウト設定", f"実行者: {interaction.user.mention}\n対象: {member.mention}\n期間: {minutes}分\n理由: {reason}", discord.Color.dark_gold())
-    except Exception as e:
-        await interaction.response.send_message(f"❌ タイムアウト処理に失敗しました: {e}", ephemeral=True)
-
-
-# =========================================================
-# 9. 自動安全フィルター & メッセージ受信イベント
-# =========================================================
-NG_WORDS = ["荒らし", "スパム", "Discord招待リンク禁止"]
-
-@client.event
-async def on_message(message):
-    if message.author.bot or not message.guild:
-        return
-
-    for word in NG_WORDS:
-        if word in message.content and not message.author.guild_permissions.administrator:
-            try:
-                await message.delete()
-                warning_msg = await message.channel.send(
-                    f"⚠️ {message.author.mention} 不適切なワードが含まれていたため削除しました。"
-                )
-                await send_log(
-                    message.guild,
-                    "⚠️ NGワード検知削除",
-                    f"送信者: {message.author.mention}\nチャンネル: {message.channel.mention}\n内容: `{message.content}`",
-                    discord.Color.red()
-                )
-                await asyncio.sleep(4)
-                await warning_msg.delete()
-                return
-            except discord.Forbidden:
-                pass
-
-    await process_exp(message)
-
-
-# =========================================================
-# 10. ヘルプ & エラーハンドリング & 起動メイン処理
-# =========================================================
-@tree.command(name="help", description="利用可能なコマンド一覧を表示します")
-async def custom_help(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🤖 Bot コマンドヘルプ一覧",
-        description="すべてのコマンドは `/`（スラッシュコマンド）でご利用いただけます。",
-        color=discord.Color.blue(),
-        timestamp=datetime.utcnow()
+  # 購入ボタン処理
+  async def buy_cb(inter: discord.Interaction):
+    buy_view = discord.ui.View()
+    buy_view.add_item(PaymentSelect())  # 〔リスト〕マネーライト、マネー
+    await inter.response.send_message(
+        "決済方法を選択してください。", view=buy_view, ephemeral=True
     )
 
-    embed.add_field(
-        name="👤 ユーザー・レベル機能",
-        value="`/userinfo` : ユーザー情報\n`/serverinfo` : サーバー統計\n`/rank` : レベル確認\n`/ping` : 応答速度",
-        inline=False
+  # 在庫確認ボタン処理
+  async def stock_cb(inter: discord.Interaction):
+    stock_info = []
+    for i_id, i_data in vm_data["items"].items():
+      stock_num = (
+          "無限"
+          if i_data["type"] == "無限"
+          else str(i_data.get("stock", "有限"))
+      )
+      stock_info.append(f"**{i_data['name']}**\n在庫:{stock_num}")
+
+    msg = "\n\n".join(stock_info) if stock_info else "商品が登録されていません。"
+    await inter.response.send_message(msg, ephemeral=True)
+
+  buy_btn.callback = buy_cb
+  stock_btn.callback = stock_cb
+
+  view.add_item(buy_btn)
+  view.add_item(stock_btn)
+
+  await interaction.response.send_message(embed=embed, view=view)
+
+
+# /商品追加
+@bot.tree.command(name="商品追加", description="自販機に商品を追加")
+@app_commands.describe(
+    vending_machine_id="商品を追加する自販機",
+    type="商品タイプ",
+    monay="マネーの値段",
+    manera="マネーライトの金額",
+    name="商品名",
+    description="商品説明文",
+    emoji="一絵文字のみ",
+)
+@app_commands.choices(
+    type=[
+        app_commands.Choice(name="有限", value="有限"),
+        app_commands.Choice(name="無限", value="無限"),
+    ]
+)
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+async def add_item(
+    interaction: discord.Interaction,
+    vending_machine_id: str,
+    type: str,
+    monay: int,
+    manera: int,
+    name: str,
+    description: str = None,
+    emoji: str = None,
+):
+  if vending_machine_id not in vending_machines:
+    await interaction.response.send_message(
+        "指定された自販機が見つかりません。", ephemeral=True
     )
-    embed.add_field(
-        name="🛡️ ロール・チケット管理",
-        value="`/addrole` / `/removerole` : ロール操作\n`/roleall` : 一括ロール付与\n`/roles` : ロール一覧\n`/setup_ticket` : チケット設置",
-        inline=False
+    return
+
+  item_id = str(uuid.uuid4())
+  vending_machines[vending_machine_id]["items"][item_id] = {
+      "name": name,
+      "type": type,
+      "money": monay,
+      "manera": manera,
+      "description": description,
+      "emoji": emoji,
+      "stock": "無限" if type == "無限" else 0,
+  }
+
+  vm_name = vending_machines[vending_machine_id]["name"]
+  await interaction.response.send_message(
+      f"自販機「{vm_name}」に商品名「{name}」を追加しました。",
+      ephemeral=True,
+  )
+
+
+# /商品内容変更
+@bot.tree.command(name="商品内容変更", description="商品の内容を変更")
+@app_commands.describe(vending_machine_id="対象の自販機")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+async def edit_item(interaction: discord.Interaction, vending_machine_id: str):
+  if (
+      vending_machine_id not in vending_machines
+      or not vending_machines[vending_machine_id]["items"]
+  ):
+    await interaction.response.send_message(
+        "指定された自販機が存在しないか、商品が登録されていません。",
+        ephemeral=True,
     )
-    embed.add_field(
-        name="👞 モデレーション",
-        value="`/clear [件数]` : メッセージ削除\n`/timeout` : タイムアウト\n`/kick` / `/ban` : キック・BAN",
-        inline=False
+    return
+
+  view = discord.ui.View()
+  view.add_item(EditItemSelect(vending_machine_id))
+  await interaction.response.send_message(
+      "内容を変更する商品を選択してください", view=view, ephemeral=True
+  )
+
+
+# /商品削除
+@bot.tree.command(name="商品削除", description="商品を削除")
+@app_commands.describe(vending_machine_id="削除する商品がある自販機")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+async def delete_item(
+    interaction: discord.Interaction, vending_machine_id: str
+):
+  if (
+      vending_machine_id not in vending_machines
+      or not vending_machines[vending_machine_id]["items"]
+  ):
+    await interaction.response.send_message(
+        "指定された自販機が存在しないか、商品が登録されていません。",
+        ephemeral=True,
     )
+    return
 
-    embed.set_footer(text=f"実行者: {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
+  view = discord.ui.View()
+  view.add_item(DeleteItemSelect(vending_machine_id))
+  await interaction.response.send_message(
+      "削除する商品を選択", view=view, ephemeral=True
+  )
 
-@tree.command(name="ping", description="Botの応答速度を確認します")
-async def ping_check(interaction: discord.Interaction):
-    latency = round(client.latency * 1000)
-    await interaction.response.send_message(f"🏓 Pong! レイテンシ: **{latency} ms**")
 
-# スラッシュコマンドのエラー処理
-@tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        if not interaction.response.is_done():
-            await interaction.response.send_message("🚫 このコマンドを実行する権限が不足しています。", ephemeral=True)
-        else:
-            await interaction.followup.send("🚫 このコマンドを実行する権限が不足しています。", ephemeral=True)
-    else:
-        print(f"スラッシュコマンドエラー: {error}", file=sys.stderr)
-
-if __name__ == "__main__":
-    keep_alive()
-    
-    TOKEN = os.getenv("DISCORD_TOKEN")
-    if TOKEN:
-        try:
-            client.run(TOKEN)
-        except Exception as e:
-            print(f"❌ 起動エラー: {e}")
-    else:
-        print("❌ エラー: DISCORD_TOKEN が設定されていません。")
+bot.run("YOUR_BOT_TOKEN_HERE")
