@@ -1,2 +1,2 @@
 discord.py>=2.3.0
-paypaython>=0.1.0
+paypaython
