@@ -1,3 +1,4 @@
+import os
 import uuid
 import discord
 from discord import app_commands
@@ -6,18 +7,6 @@ from discord.ext import commands
 # ----------------------------------------------------
 # 簡易データベース (メモリ保持)
 # ----------------------------------------------------
-# vending_machines = {
-#     "uuid": {
-#         "name": "自販機名",
-#         "items": {
-#             "item_id": {
-#                 "name": "商品名", "type": "有限"/"無限",
-#                 "money": 100, "manera": 100,
-#                 "description": "説明", "emoji": "🍎", "stock": 10
-#             }
-#         }
-#     }
-# }
 vending_machines = {}
 
 intents = discord.Intents.default()
@@ -25,7 +14,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 # ----------------------------------------------------
-# 動的【検知】用 Autocomplete (自販機名・商品名)
+# 動的【検知】用 Autocomplete (自販機名)
 # ----------------------------------------------------
 async def vending_machine_autocomplete(
     interaction: discord.Interaction, current: str
@@ -260,7 +249,6 @@ async def on_ready():
 async def create_vending_machine(
     interaction: discord.Interaction, name: str
 ):
-  # ランダムな長いIDを発行 (例: abcdefg-1123456-a1b2c3d4 代替)
   v_id = str(uuid.uuid4())
   vending_machines[v_id] = {"name": name, "items": {}}
 
@@ -288,7 +276,7 @@ async def delete_vending_machine(
 
   # 〔自販機〕パネル作成
   embed = discord.Embed(
-      title="# 自販機削除確認",  # (((自販機削除確認)))
+      title="# 自販機削除確認",
       description=(
           f"本当に自販機「{target_name}」を削除しますか？\n**この操作は取り消せません。\nすべての商品と在庫のデータも削除されます。**"
       ),
@@ -296,11 +284,9 @@ async def delete_vending_machine(
   )
 
   view = discord.ui.View()
-  # 〔button〕{赤色}削除する
   delete_btn = discord.ui.Button(
       label="削除する", style=discord.ButtonStyle.danger
   )
-  # 〔button〕{#36363B}キャンセル
   cancel_btn = discord.ui.Button(
       label="キャンセル", style=discord.ButtonStyle.secondary
   )
@@ -348,14 +334,11 @@ async def place_vending_machine(
   vm_data = vending_machines[vending_machine_id]
   title = panel_title if panel_title else vm_data["name"]
 
-  # 〔自販機〕〔横線色〕{黄緑} (#8A2BE2/緑系)
   embed = discord.Embed(title=title, color=discord.Color.green())
 
-  # 説明文の設定 (指定がない場合は追加せず改行も発生させない)
   if panel_description:
     embed.description = panel_description
 
-  # その自販機の中にある商品全てを縦に並べて表示
   for item_id, item in vm_data["items"].items():
     field_value = (
         f"マネー:{item['money']}マネーライト:{item['manera']}"
@@ -369,24 +352,20 @@ async def place_vending_machine(
     )
 
   view = discord.ui.View()
-  # 〔button〕{黄緑}🛒購入する
   buy_btn = discord.ui.Button(
       label="🛒購入する", style=discord.ButtonStyle.success
   )
-  # 〔button〕{赤色}在庫確認
   stock_btn = discord.ui.Button(
       label="在庫確認", style=discord.ButtonStyle.danger
   )
 
-  # 購入ボタン処理
   async def buy_cb(inter: discord.Interaction):
     buy_view = discord.ui.View()
-    buy_view.add_item(PaymentSelect())  # 〔リスト〕マネーライト、マネー
+    buy_view.add_item(PaymentSelect())
     await inter.response.send_message(
         "決済方法を選択してください。", view=buy_view, ephemeral=True
     )
 
-  # 在庫確認ボタン処理
   async def stock_cb(inter: discord.Interaction):
     stock_info = []
     for i_id, i_data in vm_data["items"].items():
@@ -507,4 +486,12 @@ async def delete_item(
   )
 
 
-bot.run("YOUR_BOT_TOKEN_HERE")
+# ----------------------------------------------------
+# 起動処理 (環境変数からトークンを取得)
+# ----------------------------------------------------
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+if TOKEN is None:
+  print("エラー: 環境変数 'DISCORD_TOKEN' が設定されていません。")
+else:
+  bot.run(TOKEN)
