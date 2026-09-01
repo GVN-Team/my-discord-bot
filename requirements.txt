@@ -1,2 +1,2 @@
 discord.py>=2.3.0
-git+https://github.com/GVN-Team/my-discord-bot/raw/refs/heads/main/paypaython
+git+https://github.com/t33m-p/paypaython.git
