@@ -1,8 +1,19 @@
 import os
+import re
 import uuid
 import discord
 from discord import app_commands
 from discord.ext import commands
+from paypaython import PayPay  # PayPayライブラリの読み込み
+
+# ----------------------------------------------------
+# PayPay 設定
+# ----------------------------------------------------
+PAYPAY_PHONE = "08012345678"  # PayPay登録電話番号
+PAYPAY_PASSWORD = "YourPassword"  # PayPayパスワード
+
+# PayPayインスタンスの初期化
+paypay = PayPay(phone=PAYPAY_PHONE, password=PAYPAY_PASSWORD)
 
 # ----------------------------------------------------
 # 簡易データベース (メモリ保持)
@@ -13,9 +24,6 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# ----------------------------------------------------
-# 動的【検知】用 Autocomplete (自販機名)
-# ----------------------------------------------------
 async def vending_machine_autocomplete(
     interaction: discord.Interaction, current: str
 ):
@@ -31,7 +39,7 @@ async def vending_machine_autocomplete(
 # ----------------------------------------------------
 
 
-# モーダル: 商品購入フォーム 〔自入力〕
+# モーダル: 商品購入フォーム 〔自入力＆金額比較・受取ロジック〕
 class PurchaseModal(discord.ui.Modal, title="商品購入"):
   quantity = discord.ui.TextInput(
       label="個数*",
@@ -41,27 +49,89 @@ class PurchaseModal(discord.ui.Modal, title="商品購入"):
   )
   paypay_link = discord.ui.TextInput(
       label="PayPay送金リンク*",
-      placeholder="PayPayのリンクを入力",
+      placeholder="https://pay.paypay.ne.jp/...",
       required=True,
       style=discord.TextStyle.short,
   )
 
-  def __init__(self, payment_method: str):
+  def __init__(self, v_id: str, item_id: str, payment_method: str):
     super().__init__()
+    self.v_id = v_id
+    self.item_id = item_id
     self.payment_method = payment_method
 
   async def on_submit(self, interaction: discord.Interaction):
-    await interaction.response.send_message(
-        f"購入申請を受け付けました。\n決済方法: {self.payment_method}\n個数:"
-        f" {self.quantity.value}\nリンク: {self.paypay_link.value}",
-        ephemeral=True,
+    await interaction.response.defer(ephemeral=True)
+
+    # 1. 個数の数値チェック
+    try:
+      qty = int(self.quantity.value)
+      if qty <= 0:
+        raise ValueError
+    except ValueError:
+      await interaction.followup.send(
+          "エラー: 個数は1以上の正の整数で入力してください。", ephemeral=True
+      )
+      return
+
+    # 2. 商品情報の取得と必要金額の計算
+    item = vending_machines[self.v_id]["items"].get(self.item_id)
+    if not item:
+      await interaction.followup.send(
+          "エラー: 商品が見つかりませんでした。", ephemeral=True
+      )
+      return
+
+    # 決済方法に応じた単価を取得 (マネー または マネーライト)
+    unit_price = (
+        item["money"] if self.payment_method == "マネー" else item["manera"]
     )
+    expected_total = unit_price * qty
+    link = self.paypay_link.value.strip()
+
+    # 3. PayPayリンクの検証と自動受取
+    try:
+      # リンク情報の解析
+      link_info = paypay.link_check(link)
+      link_amount = int(link_info.money)
+
+      # 金額の一致確認
+      if link_amount != expected_total:
+        await interaction.followup.send(
+            f"❌ 金額が一致しません。\n"
+            f"必要金額: {expected_total} 円 ({self.payment_method})\n"
+            f"送金リンクの金額: {link_amount} 円",
+            ephemeral=True,
+        )
+        return
+
+      # 受取処理（自身のPayPay残高に追加）
+      receive_result = paypay.link_receive(link)
+
+      # 在庫更新（有限の場合）
+      if item["type"] == "有限":
+        item["stock"] = max(0, item.get("stock", 0) - qty)
+
+      await interaction.followup.send(
+          f"✅ 決済および受取が完了しました！\n"
+          f"商品: {item['name']} × {qty}個\n"
+          f"受取金額: {link_amount}円\n"
+          f"ステータス: {receive_result.status}",
+          ephemeral=True,
+      )
+
+    except Exception as e:
+      await interaction.followup.send(
+          f"❌ 処理中にエラーが発生しました: {e}", ephemeral=True
+      )
 
 
-# ドロップダウン: 決済方法選択 〔リスト〕
+# ドロップダウン: 決済方法選択
 class PaymentSelect(discord.ui.Select):
 
-  def __init__(self):
+  def __init__(self, v_id: str, item_id: str):
+    self.v_id = v_id
+    self.item_id = item_id
     options = [
         discord.SelectOption(
             label="マネー", value="マネー", description="マネーで決済"
@@ -81,7 +151,39 @@ class PaymentSelect(discord.ui.Select):
 
   async def callback(self, interaction: discord.Interaction):
     selected = self.values[0]
-    await interaction.response.send_modal(PurchaseModal(payment_method=selected))
+    await interaction.response.send_modal(
+        PurchaseModal(
+            v_id=self.v_id, item_id=self.item_id, payment_method=selected
+        )
+    )
+
+
+# ドロップダウン: 購入商品選択
+class PurchaseItemSelect(discord.ui.Select):
+
+  def __init__(self, v_id: str):
+    self.v_id = v_id
+    items = vending_machines[v_id]["items"]
+    options = [
+        discord.SelectOption(
+            label=data["name"], value=i_id, emoji=data.get("emoji")
+        )
+        for i_id, data in items.items()
+    ]
+    super().__init__(
+        placeholder="購入する商品を選択してください",
+        min_values=1,
+        max_values=1,
+        options=options,
+    )
+
+  async def callback(self, interaction: discord.Interaction):
+    item_id = self.values[0]
+    view = discord.ui.View()
+    view.add_item(PaymentSelect(v_id=self.v_id, item_id=item_id))
+    await interaction.response.send_message(
+        "決済方法を選択してください。", view=view, ephemeral=True
+    )
 
 
 # モーダル: 商品内容変更 〔自入力〕
@@ -149,7 +251,7 @@ class EditItemModal(discord.ui.Modal, title="商品内容変更"):
     )
 
 
-# ドロップダウン: 変更対象商品選択 【検知(選択した自販機の中にある商品名)】
+# ドロップダウン: 変更対象商品選択
 class EditItemSelect(discord.ui.Select):
 
   def __init__(self, v_id: str):
@@ -176,7 +278,7 @@ class EditItemSelect(discord.ui.Select):
     )
 
 
-# ドロップダウン: 削除対象商品選択 【検知(選択した自販機の中にある商品名)】
+# ドロップダウン: 削除対象商品選択
 class DeleteItemSelect(discord.ui.Select):
 
   def __init__(self, v_id: str):
@@ -200,12 +302,9 @@ class DeleteItemSelect(discord.ui.Select):
     item_name = vending_machines[self.v_id]["items"][item_id]["name"]
 
     view = discord.ui.View()
-
-    # 〔button〕{赤色}削除
     confirm_btn = discord.ui.Button(
         label="削除", style=discord.ButtonStyle.danger
     )
-    # 〔button〕{#36363B}キャンセル
     cancel_btn = discord.ui.Button(
         label="キャンセル", style=discord.ButtonStyle.secondary
     )
@@ -274,7 +373,6 @@ async def delete_vending_machine(
 
   target_name = vending_machines[vending_machine_id]["name"]
 
-  # 〔自販機〕パネル作成
   embed = discord.Embed(
       title="# 自販機削除確認",
       description=(
@@ -341,7 +439,7 @@ async def place_vending_machine(
 
   for item_id, item in vm_data["items"].items():
     field_value = (
-        f"マネー:{item['money']}マネーライト:{item['manera']}"
+        f"マネー:{item['money']} | マネーライト:{item['manera']}"
     )
     if item.get("description"):
       field_value = f"{item['description']}\n" + field_value
@@ -360,10 +458,15 @@ async def place_vending_machine(
   )
 
   async def buy_cb(inter: discord.Interaction):
+    if not vm_data["items"]:
+      await inter.response.send_message(
+          "この自販機には商品がありません。", ephemeral=True
+      )
+      return
     buy_view = discord.ui.View()
-    buy_view.add_item(PaymentSelect())
+    buy_view.add_item(PurchaseItemSelect(vending_machine_id))
     await inter.response.send_message(
-        "決済方法を選択してください。", view=buy_view, ephemeral=True
+        "購入する商品を選択してください。", view=buy_view, ephemeral=True
     )
 
   async def stock_cb(inter: discord.Interaction):
@@ -372,7 +475,7 @@ async def place_vending_machine(
       stock_num = (
           "無限"
           if i_data["type"] == "無限"
-          else str(i_data.get("stock", "有限"))
+          else str(i_data.get("stock", 0))
       )
       stock_info.append(f"**{i_data['name']}**\n在庫:{stock_num}")
 
@@ -487,7 +590,7 @@ async def delete_item(
 
 
 # ----------------------------------------------------
-# 起動処理 (環境変数からトークンを取得)
+# 起動処理
 # ----------------------------------------------------
 TOKEN = os.getenv("DISCORD_TOKEN")
 
