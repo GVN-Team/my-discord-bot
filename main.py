@@ -123,15 +123,17 @@ class EditItemModal(discord.ui.Modal, title="商品内容変更"):
     self.item_id = item_id
 
     self.item_name = discord.ui.TextInput(
-        label="商品名*", default=current_item["name"], required=True
+        label="商品名*", default=str(current_item["name"]), required=True
     )
     self.description = discord.ui.TextInput(
         label="説明文",
-        default=current_item.get("description", ""),
+        default=str(current_item.get("description", "") or ""),
         required=False,
     )
     self.item_type = discord.ui.TextInput(
-        label="タイプ(有限/無限)*", default=current_item["type"], required=True
+        label="タイプ(有限/無限)*",
+        default=str(current_item["type"]),
+        required=True,
     )
     self.money = discord.ui.TextInput(
         label="マネー*", default=str(current_item["money"]), required=True
@@ -567,7 +569,7 @@ async def add_stock(
           required=False,
       )
 
-      async def on_submit(m_inter: discord.Interaction):
+      async def on_submit(self, m_inter: discord.Interaction):
         if "stock_list" not in item:
           item["stock_list"] = []
         item["stock_list"].append(
