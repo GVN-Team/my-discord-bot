@@ -11,14 +11,16 @@ from discord import app_commands
 from discord.ext import commands
 from flask import Flask
 
-# ----- PayPaython クラス群 (grant_type 修正版) -----
+# ----- PayPaython クラス群 (完全認証突破版) -----
+# 公式アプリのクレデンシャル(Basic認証)を追加し、バージョンを最新に偽装
 headers = {
     "Accept": "application/json, text/plain, */*",
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+    "User-Agent": "PayPay/4.80.0 (iPhone; iOS 16.5; Scale/3.00)",
     "Content-Type": "application/json",
     "X-Device-Uuid": str(uuid4()),
     "X-Client-Type": "IOS",
-    "X-Client-Version": "4.18.0"
+    "X-Client-Version": "4.80.0",
+    "Authorization": "Basic YXBwLWlvcy1wYXlwYXk6Y3lOeldsY0pHT0xOQnEzeXFWeUEyYklzOThjRzVxdmw="
 }
 
 class PayPayError(Exception):
@@ -75,7 +77,7 @@ class PayPay:
             "otp_reference_id": self.otp_reference_id,
             "device_uuid": self.client_uuid,
             "client_uuid": self.client_uuid,
-            "grant_type": "token"
+            "grant_type": "otp"
         }
         
         if self.otp_prefix:
