@@ -48,16 +48,18 @@ class PayPay:
             }
             login = self.session.post("https://www.paypay.ne.jp/app/v1/oauth/token", json=payload, headers=headers, proxies=proxy)
             try:
-                self.access_token = (login.json()["access_token"])
-            except:
-                try:
-                    if login.json()["response_type"] == "ErrorResponse":
-                        raise PayPayLoginError(login.json())
-                    else:
-                        self.otp_prefix = login.json()["otp_prefix"]
-                        self.otp_reference_id = login.json()["otp_reference_id"]
-                except:
-                    raise PayPayNetWorkError(login.text)
+                data = login.json()
+                if "access_token" in data:
+                    self.access_token = data["access_token"]
+                elif "otp_prefix" in data:
+                    self.otp_prefix = data["otp_prefix"]
+                    self.otp_reference_id = data["otp_reference_id"]
+                else:
+                    raise PayPayLoginError(data)
+            except Exception as e:
+                if isinstance(e, PayPayLoginError):
+                    raise e
+                raise PayPayNetWorkError(login.text)
 
     def login(self, otp: str):
         payload = {
