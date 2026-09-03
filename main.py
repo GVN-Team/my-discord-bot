@@ -11,11 +11,14 @@ from discord import app_commands
 from discord.ext import commands
 from flask import Flask
 
-# ----- PayPaython クラス群 -----
+# ----- PayPaython クラス群 (最新修正版) -----
 headers = {
     "Accept": "application/json, text/plain, */*",
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-    "Content-Type": "application/json"
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+    "Content-Type": "application/json",
+    "X-Device-Uuid": str(uuid4()),
+    "X-Client-Type": "IOS",
+    "X-Client-Version": "4.18.0"
 }
 
 class PayPayError(Exception):
@@ -51,9 +54,9 @@ class PayPay:
                 data = login.json()
                 if "access_token" in data:
                     self.access_token = data["access_token"]
-                elif "otp_prefix" in data:
-                    self.otp_prefix = data["otp_prefix"]
-                    self.otp_reference_id = data["otp_reference_id"]
+                elif "otp_prefix" in data or "otp_reference_id" in data:
+                    self.otp_prefix = data.get("otp_prefix")
+                    self.otp_reference_id = data.get("otp_reference_id")
                 else:
                     raise PayPayLoginError(data)
             except Exception as e:
@@ -62,12 +65,15 @@ class PayPay:
                 raise PayPayNetWorkError(login.text)
 
     def login(self, otp: str):
+        # 入力値から自動で数字のみを抽出
+        clean_otp = "".join(filter(str.isdigit, str(otp)))
+
         payload = {
-            "otp": otp,
+            "otp": clean_otp,
             "otp_reference_id": self.otp_reference_id,
-            "device_uuid": str(uuid4()),
+            "device_uuid": self.client_uuid,
             "client_uuid": self.client_uuid,
-            "grant_type": "otp"
+            "grant_type": "otp_verification"
         }
         res = self.session.post("https://www.paypay.ne.jp/app/v1/oauth/token", json=payload, headers=headers, proxies=self.proxy)
         try:
