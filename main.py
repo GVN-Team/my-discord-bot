@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 from flask import Flask
 
-# ----- PayPaython クラス群 (最新修正版) -----
+# ----- PayPaython クラス群 (400エラー修正版) -----
 headers = {
     "Accept": "application/json, text/plain, */*",
     'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
@@ -35,6 +35,9 @@ class PayPay:
         self.client_uuid = client_uuid
         self.phone = phone
         self.password = password
+        self.otp_prefix = None
+        self.otp_reference_id = None
+        
         if access_token:
             self.access_token = access_token
             self.session.cookies.set("token", access_token)
@@ -65,7 +68,6 @@ class PayPay:
                 raise PayPayNetWorkError(login.text)
 
     def login(self, otp: str):
-        # 入力値から自動で数字のみを抽出
         clean_otp = "".join(filter(str.isdigit, str(otp)))
 
         payload = {
@@ -73,8 +75,12 @@ class PayPay:
             "otp_reference_id": self.otp_reference_id,
             "device_uuid": self.client_uuid,
             "client_uuid": self.client_uuid,
-            "grant_type": "otp_verification"
+            "grant_type": "otp"
         }
+        
+        if self.otp_prefix:
+            payload["otp_prefix"] = self.otp_prefix
+
         res = self.session.post("https://www.paypay.ne.jp/app/v1/oauth/token", json=payload, headers=headers, proxies=self.proxy)
         try:
             data = res.json()
@@ -215,7 +221,7 @@ async def coupon_autocomplete(interaction: discord.Interaction, current: str):
 
 
 # ----------------------------------------------------
-# 4. UIコンポーネント (モーダル・ドロップダウン)
+# 4. UIコンポーネント
 # ----------------------------------------------------
 class PurchaseModal(discord.ui.Modal, title="商品購入"):
     def __init__(self, v_id: str, item_id: str, payment_method: str):
@@ -418,9 +424,9 @@ class DeleteItemSelect(discord.ui.Select):
 class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
     otp = discord.ui.TextInput(
         label="SMSに届いた認証コード*",
-        placeholder="6桁の数字",
+        placeholder="XX-1234 または 1234 (数字のみでも可)",
         required=True,
-        max_length=6
+        max_length=10
     )
 
     def __init__(self, temp_paypay: PayPay):
@@ -439,8 +445,7 @@ class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
             await interaction.followup.send(
                 f"✅ **PayPayログインに成功しました！**\n"
                 f"BotのPayPay連携が有効化されました。\n\n"
-                f"※Renderを再起動してもログインを維持したい場合は、"
-                f"Renderの環境変数 `PAYPAY_TOKEN` に以下のトークンを設定してください:\n"
+                f"※再起動後も保持する場合は、環境変数 `PAYPAY_TOKEN` に以下を設定してください:\n"
                 f"```\n{token}\n```",
                 ephemeral=True
             )
