@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 from flask import Flask
 
-# ----- PayPaython クラス群 (400エラー修正版) -----
+# ----- PayPaython クラス群 (grant_type 修正版) -----
 headers = {
     "Accept": "application/json, text/plain, */*",
     'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
@@ -75,7 +75,7 @@ class PayPay:
             "otp_reference_id": self.otp_reference_id,
             "device_uuid": self.client_uuid,
             "client_uuid": self.client_uuid,
-            "grant_type": "otp"
+            "grant_type": "token"
         }
         
         if self.otp_prefix:
@@ -424,7 +424,7 @@ class DeleteItemSelect(discord.ui.Select):
 class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
     otp = discord.ui.TextInput(
         label="SMSに届いた認証コード*",
-        placeholder="XX-1234 または 1234 (数字のみでも可)",
+        placeholder="1234 (数字のみ)",
         required=True,
         max_length=10
     )
