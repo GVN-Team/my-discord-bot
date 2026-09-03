@@ -1,32 +1,162 @@
 import os
-from threading import Thread
 import uuid
+from threading import Thread
 import discord
 from discord import app_commands
 from discord.ext import commands
 from flask import Flask
+
+# ----- PayPaython クラス群の読み込み -----
+from uuid import uuid4
+import datetime
+import requests
+from typing import NamedTuple
+
+headers = {
+    "Accept": "application/json, text/plain, */*",
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    "Content-Type": "application/json"
+}
+
+class PayPayError(Exception):
+    pass
+class PayPayNetWorkError(Exception):
+    pass
+class PayPayLoginError(Exception):
+    pass
+
+class PayPay:
+    def __init__(self, phone: str = None, password: str = None, client_uuid: str = str(uuid4()).upper(), access_token: str = None, proxy: dict = None):
+        self.session = requests.Session()
+        self.proxy = proxy
+        self.client_uuid = client_uuid
+        self.phone = phone
+        self.password = password
+        if access_token:
+            self.access_token = access_token
+            self.session.cookies.set("token", access_token)
+        elif phone:
+            self.access_token = None
+            payload = {
+                "scope": "SIGN_IN",
+                "client_uuid": self.client_uuid,
+                "grant_type": "password",
+                "username": self.phone,
+                "password": self.password,
+                "add_otp_prefix": True,
+                "language": "ja"
+            }
+            login = self.session.post("https://www.paypay.ne.jp/app/v1/oauth/token", json=payload, headers=headers, proxies=proxy)
+            try:
+                self.access_token = (login.json()["access_token"])
+            except:
+                try:
+                    if login.json()["response_type"] == "ErrorResponse":
+                        raise PayPayLoginError(login.json())
+                    else:
+                        self.otp_prefix = login.json()["otp_prefix"]
+                        self.otp_reference_id = login.json()["otp_reference_id"]
+                except:
+                    raise PayPayNetWorkError(login.text)
+
+    def link_check(self, url: str):
+        if "https://" in url:
+            url = url.replace("https://pay.paypay.ne.jp/", "")
+
+        param = {"verificationCode": url}
+        link_info = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy).json()
+        
+        if link_info["header"]["resultCode"] != "S0000":
+            raise PayPayError(link_info)
+        
+        class LinkInfo(NamedTuple):
+            sender_name: str
+            sender_external_id: str
+            sender_icon: str
+            order_id: str
+            chat_room_id: str
+            amount: int
+            status: str
+            money_light: int
+            money: int
+            has_password: bool
+            raw: dict
+
+        sender_name = link_info["payload"]["sender"]["displayName"]
+        sender_external_id = link_info["payload"]["sender"]["externalId"]
+        sender_icon = link_info["payload"]["sender"]["photoUrl"]
+        order_id = link_info["payload"]["pendingP2PInfo"]["orderId"]
+        chat_room_id = link_info["payload"]["message"]["chatRoomId"]
+        amount = link_info["payload"]["pendingP2PInfo"]["amount"]
+        status = link_info["payload"]["message"]["data"]["status"]
+        money_light = link_info["payload"]["message"]["data"]["subWalletSplit"]["senderPrepaidAmount"]
+        money = link_info["payload"]["message"]["data"]["subWalletSplit"]["senderEmoneyAmount"]
+        has_password = link_info["payload"]["pendingP2PInfo"]["isSetPasscode"]
+
+        return LinkInfo(sender_name, sender_external_id, sender_icon, order_id, chat_room_id, amount, status, money_light, money, has_password, link_info)
+
+    def link_receive(self, url: str, password: str = None, link_info: dict = None) -> dict:
+        if not self.access_token:
+            raise PayPayLoginError("まずはログインしてください")
+        
+        if "https://" in url:
+            url = url.replace("https://pay.paypay.ne.jp/", "")
+        
+        if not link_info:
+            param = {"verificationCode": url}
+            link_info = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy).json()
+            if link_info["header"]["resultCode"] != "S0000":
+                raise PayPayError(link_info)
+        
+        if link_info["payload"]["orderStatus"] != "PENDING":
+            raise PayPayError("すでに 受け取り / 辞退 / キャンセル されているリンクです")
+        
+        if link_info["payload"]["pendingP2PInfo"]["isSetPasscode"] and password == None:
+            raise PayPayError("このリンクにはパスワードが設定されています")
+        
+        payload = {
+            "verificationCode": url,
+            "client_uuid": self.client_uuid,
+            "requestAt": str(datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime('%Y-%m-%dT%H:%M:%S+0900')),
+            "requestId": link_info["payload"]["message"]["data"]["requestId"],
+            "orderId": link_info["payload"]["message"]["data"]["orderId"],
+            "senderMessageId": link_info["payload"]["message"]["messageId"],
+            "senderChannelUrl": link_info["payload"]["message"]["chatRoomId"],
+            "iosMinimumVersion": "3.45.0",
+            "androidMinimumVersion": "3.45.0"
+        }
+        
+        if password:
+            payload["passcode"] = password
+
+        receive = self.session.post("https://www.paypay.ne.jp/app/v2/p2p-api/acceptP2PSendMoneyLink", json=payload, headers=headers, proxies=self.proxy).json()
+        if receive["header"]["resultCode"] == "S0001":
+            raise PayPayLoginError(receive)
+        
+        if receive["header"]["resultCode"] != "S0000":
+            raise PayPayError(receive)
+        
+        return receive
+
 
 # ----------------------------------------------------
 # 1. スリープ防止用 Flask サーバー
 # ----------------------------------------------------
 app = Flask("")
 
-
 @app.route("/")
 def home():
-  return "Bot is alive!"
-
+    return "Bot is alive!"
 
 def run():
-  app.run(host="0.0.0.0", port=8080)
-
+    app.run(host="0.0.0.0", port=8080)
 
 def keep_alive():
-  Thread(target=run).start()
+    Thread(target=run).start()
 
 
 # ----------------------------------------------------
-# 2. ボット初期化 & 簡易データベース (メモリ保持)
+# 2. ボット初期化 & データベース (メモリ保持)
 # ----------------------------------------------------
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -34,452 +164,393 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 vending_machines = {}
 coupons = {}
 
+# PayPayインスタンスの生成
+paypay_client = None
 
 # ----------------------------------------------------
 # 3. オートコンプリート関数
 # ----------------------------------------------------
-async def vending_machine_autocomplete(
-    interaction: discord.Interaction, current: str
-):
-  return [
-      app_commands.Choice(name=data["name"], value=v_id)
-      for v_id, data in vending_machines.items()
-      if current.lower() in data["name"].lower()
-  ][:25]
-
+async def vending_machine_autocomplete(interaction: discord.Interaction, current: str):
+    return [
+        app_commands.Choice(name=data["name"], value=v_id)
+        for v_id, data in vending_machines.items()
+        if current.lower() in data["name"].lower()
+    ][:25]
 
 async def coupon_autocomplete(interaction: discord.Interaction, current: str):
-  return [
-      app_commands.Choice(name=code, value=code)
-      for code in coupons.keys()
-      if current.lower() in code.lower()
-  ][:25]
+    return [
+        app_commands.Choice(name=code, value=code)
+        for code in coupons.keys()
+        if current.lower() in code.lower()
+    ][:25]
 
 
 # ----------------------------------------------------
 # 4. UIコンポーネント (モーダル・ドロップダウン)
 # ----------------------------------------------------
 
-
-# モーダル: 購入フォーム
+# モーダル: 購入フォーム（PayPay直接受取機能を追加）
 class PurchaseModal(discord.ui.Modal, title="商品購入"):
+    def __init__(self, v_id: str, item_id: str, payment_method: str):
+        super().__init__()
+        self.v_id = v_id
+        self.item_id = item_id
+        self.payment_method = payment_method
 
-  def __init__(self, item_name: str, payment_method: str):
-    super().__init__()
-    self.quantity = discord.ui.TextInput(
-        label=f"{item_name}*", placeholder="購入個数を入力", required=True
-    )
-    self.paypay_link = discord.ui.TextInput(
-        label="PayPay送金リンク*",
-        placeholder="PayPay送金リンクを入力",
-        required=True,
-    )
-    self.add_item(self.quantity)
-    self.add_item(self.paypay_link)
-    self.payment_method = payment_method
+        self.quantity = discord.ui.TextInput(
+            label="購入個数*", placeholder="1", default="1", required=True
+        )
+        self.paypay_link = discord.ui.TextInput(
+            label="PayPay送金リンク*",
+            placeholder="https://pay.paypay.ne.jp/...",
+            required=True,
+        )
+        self.passcode = discord.ui.TextInput(
+            label="パスコード (設定されている場合)",
+            placeholder="4桁の数字",
+            required=False,
+            max_length=4
+        )
+        self.add_item(self.quantity)
+        self.add_item(self.paypay_link)
+        self.add_item(self.passcode)
 
-  async def on_submit(self, interaction: discord.Interaction):
-    await interaction.response.send_message(
-        f"購入申請を受け付けました。\n決済方法: {self.payment_method}\n個数:"
-        f" {self.quantity.value}\nリンク: {self.paypay_link.value}",
-        ephemeral=True,
-    )
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        # 個数の検証
+        try:
+            qty = int(self.quantity.value)
+            if qty <= 0:
+                raise ValueError
+        except ValueError:
+            await interaction.followup.send("購入個数は1以上の整数で入力してください。", ephemeral=True)
+            return
+
+        item = vending_machines.get(self.v_id, {}).get("items", {}).get(self.item_id)
+        if not item:
+            await interaction.followup.send("商品が見つかりませんでした。", ephemeral=True)
+            return
+
+        # 在庫チェック
+        if item["type"] == "有限":
+            stock_list = item.get("stock_list", [])
+            if len(stock_list) < qty:
+                await interaction.followup.send(f"在庫が足りません。(現在在庫: {len(stock_list)}個)", ephemeral=True)
+                return
+
+        # 必要金額の計算
+        unit_price = item["money"] if self.payment_method == "マネー" else item["manera"]
+        total_price = unit_price * qty
+
+        if not paypay_client:
+            await interaction.followup.send("PayPay決済処理の初期化が完了していません。管理者へご連絡ください。", ephemeral=True)
+            return
+
+        # PayPayリンクの処理と受取
+        try:
+            link_url = self.paypay_link.value
+            pass_code = self.passcode.value if self.passcode.value else None
+
+            # 1. 送金リンクのチェック
+            link_info = paypay_client.link_check(link_url)
+
+            # 種別（マネー/マネーライト）と金額の検証
+            sent_amount = link_info.money if self.payment_method == "マネー" else link_info.money_light
+            if sent_amount < total_price:
+                await interaction.followup.send(
+                    f"金額（またはマネー種別）が不足しています。\n"
+                    f"必要額: {total_price}円 ({self.payment_method}) / 送金額: {sent_amount}円",
+                    ephemeral=True
+                )
+                return
+
+            # 2. 受取実行（BotのPayPay残高に追加される）
+            paypay_client.link_receive(url=link_url, password=pass_code)
+
+        except PayPayLoginError:
+            await interaction.followup.send("PayPayログインエラーが発生しました。トークンを確認してください。", ephemeral=True)
+            return
+        except PayPayError as e:
+            await interaction.followup.send(f"PayPay処理エラー: {e}", ephemeral=True)
+            return
+        except Exception as e:
+            await interaction.followup.send(f"決済失敗: {e}", ephemeral=True)
+            return
+
+        # 3. 発送処理（在庫から引き出し）
+        delivery_msg = []
+        if item["type"] == "有限":
+            drawn = item["stock_list"][:qty]
+            item["stock_list"] = item["stock_list"][qty:]
+            for d in drawn:
+                msg_part = f"\n{d['msg']}" if d.get("msg") else ""
+                delivery_msg.append(f"```\n{d['content']}\n```" + msg_part)
+        else:
+            delivery_msg.append(f"ご購入ありがとうございます！\n商品: {item['name']} x {qty}")
+
+        result_text = f"✅ **決済が完了し、残高に直接チャージされました！**\n\n" + "\n".join(delivery_msg)
+        await interaction.followup.send(result_text, ephemeral=True)
 
 
 # ドロップダウン: 決済方法選択
 class PaymentSelect(discord.ui.Select):
+    def __init__(self, v_id: str, item_id: str):
+        self.v_id = v_id
+        self.item_id = item_id
+        options = [
+            discord.SelectOption(label="マネー", value="マネー", description="マネーで決済"),
+            discord.SelectOption(label="マネーライト", value="マネーライト", description="マネーライトで決済"),
+        ]
+        super().__init__(placeholder="決済方法を選択してください", min_values=1, max_values=1, options=options)
 
-  def __init__(self, item_name: str):
-    self.item_name = item_name
-    options = [
-        discord.SelectOption(
-            label="マネー", value="マネー", description="マネーで決済"
-        ),
-        discord.SelectOption(
-            label="マネーライト",
-            value="マネーライト",
-            description="マネーライトで決済",
-        ),
-    ]
-    super().__init__(
-        placeholder="決済方法を選択してください",
-        min_values=1,
-        max_values=1,
-        options=options,
-    )
-
-  async def callback(self, interaction: discord.Interaction):
-    await interaction.response.send_modal(
-        PurchaseModal(self.item_name, self.values[0])
-    )
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(PurchaseModal(self.v_id, self.item_id, self.values[0]))
 
 
 # モーダル: 商品内容変更
 class EditItemModal(discord.ui.Modal, title="商品内容変更"):
+    def __init__(self, v_id: str, item_id: str, current_item: dict):
+        super().__init__()
+        self.v_id = v_id
+        self.item_id = item_id
 
-  def __init__(self, v_id: str, item_id: str, current_item: dict):
-    super().__init__()
-    self.v_id = v_id
-    self.item_id = item_id
+        self.item_name = discord.ui.TextInput(label="商品名*", default=str(current_item["name"]), required=True)
+        self.description = discord.ui.TextInput(label="説明文", default=str(current_item.get("description", "") or ""), required=False)
+        self.item_type = discord.ui.TextInput(label="タイプ(有限/無限)*", default=str(current_item["type"]), required=True)
+        self.money = discord.ui.TextInput(label="マネー*", default=str(current_item["money"]), required=True)
+        self.manera = discord.ui.TextInput(label="マネーライト*", default=str(current_item["manera"]), required=True)
 
-    self.item_name = discord.ui.TextInput(
-        label="商品名*", default=str(current_item["name"]), required=True
-    )
-    self.description = discord.ui.TextInput(
-        label="説明文",
-        default=str(current_item.get("description", "") or ""),
-        required=False,
-    )
-    self.item_type = discord.ui.TextInput(
-        label="タイプ(有限/無限)*",
-        default=str(current_item["type"]),
-        required=True,
-    )
-    self.money = discord.ui.TextInput(
-        label="マネー*", default=str(current_item["money"]), required=True
-    )
-    self.manera = discord.ui.TextInput(
-        label="マネーライト*", default=str(current_item["manera"]), required=True
-    )
+        self.add_item(self.item_name)
+        self.add_item(self.description)
+        self.add_item(self.item_type)
+        self.add_item(self.money)
+        self.add_item(self.manera)
 
-    self.add_item(self.item_name)
-    self.add_item(self.description)
-    self.add_item(self.item_type)
-    self.add_item(self.money)
-    self.add_item(self.manera)
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.item_type.value not in ["有限", "無限"]:
+            await interaction.response.send_message("エラー: タイプは「有限」または「無限」で入力してください。", ephemeral=True)
+            return
 
-  async def on_submit(self, interaction: discord.Interaction):
-    if self.item_type.value not in ["有限", "無限"]:
-      await interaction.response.send_message(
-          "エラー: タイプは「有限」または「無限」で入力してください。",
-          ephemeral=True,
-      )
-      return
+        try:
+            m_val = int(self.money.value)
+            ml_val = int(self.manera.value)
+        except ValueError:
+            await interaction.response.send_message("エラー: マネー・マネーライトは数値で入力してください。", ephemeral=True)
+            return
 
-    try:
-      m_val = int(self.money.value)
-      ml_val = int(self.manera.value)
-    except ValueError:
-      await interaction.response.send_message(
-          "エラー: マネー・マネーライトは数値で入力してください。",
-          ephemeral=True,
-      )
-      return
+        item = vending_machines[self.v_id]["items"][self.item_id]
+        item["name"] = self.item_name.value
+        item["description"] = self.description.value
+        item["type"] = self.item_type.value
+        item["money"] = m_val
+        item["manera"] = ml_val
 
-    item = vending_machines[self.v_id]["items"][self.item_id]
-    item["name"] = self.item_name.value
-    item["description"] = self.description.value
-    item["type"] = self.item_type.value
-    item["money"] = m_val
-    item["manera"] = ml_val
-
-    await interaction.response.send_message(
-        f"商品「{self.item_name.value}」の内容を更新しました。",
-        ephemeral=True,
-    )
+        await interaction.response.send_message(f"商品「{self.item_name.value}」の内容を更新しました。", ephemeral=True)
 
 
 # ドロップダウン: 変更対象商品選択
 class EditItemSelect(discord.ui.Select):
+    def __init__(self, v_id: str):
+        self.v_id = v_id
+        items = vending_machines[v_id]["items"]
+        options = [
+            discord.SelectOption(label=data["name"], value=i_id, emoji=data.get("emoji"))
+            for i_id, data in items.items()
+        ]
+        super().__init__(placeholder="内容を変更する商品を選択してください", min_values=1, max_values=1, options=options)
 
-  def __init__(self, v_id: str):
-    self.v_id = v_id
-    items = vending_machines[v_id]["items"]
-    options = [
-        discord.SelectOption(
-            label=data["name"], value=i_id, emoji=data.get("emoji")
-        )
-        for i_id, data in items.items()
-    ]
-    super().__init__(
-        placeholder="内容を変更する商品を選択してください",
-        min_values=1,
-        max_values=1,
-        options=options,
-    )
-
-  async def callback(self, interaction: discord.Interaction):
-    item_id = self.values[0]
-    item = vending_machines[self.v_id]["items"][item_id]
-    await interaction.response.send_modal(
-        EditItemModal(self.v_id, item_id, item)
-    )
+    async def callback(self, interaction: discord.Interaction):
+        item_id = self.values[0]
+        item = vending_machines[self.v_id]["items"][item_id]
+        await interaction.response.send_modal(EditItemModal(self.v_id, item_id, item))
 
 
 # ドロップダウン: 削除対象商品選択
 class DeleteItemSelect(discord.ui.Select):
+    def __init__(self, v_id: str):
+        self.v_id = v_id
+        items = vending_machines[v_id]["items"]
+        options = [
+            discord.SelectOption(label=data["name"], value=i_id, emoji=data.get("emoji"))
+            for i_id, data in items.items()
+        ]
+        super().__init__(placeholder="削除する商品を選択してください", min_values=1, max_values=1, options=options)
 
-  def __init__(self, v_id: str):
-    self.v_id = v_id
-    items = vending_machines[v_id]["items"]
-    options = [
-        discord.SelectOption(
-            label=data["name"], value=i_id, emoji=data.get("emoji")
-        )
-        for i_id, data in items.items()
-    ]
-    super().__init__(
-        placeholder="削除する商品を選択してください",
-        min_values=1,
-        max_values=1,
-        options=options,
-    )
+    async def callback(self, interaction: discord.Interaction):
+        item_id = self.values[0]
+        item_name = vending_machines[self.v_id]["items"][item_id]["name"]
 
-  async def callback(self, interaction: discord.Interaction):
-    item_id = self.values[0]
-    item_name = vending_machines[self.v_id]["items"][item_id]["name"]
+        view = discord.ui.View()
+        confirm_btn = discord.ui.Button(label="削除", style=discord.ButtonStyle.danger)
+        cancel_btn = discord.ui.Button(label="キャンセル", style=discord.ButtonStyle.secondary)
 
-    view = discord.ui.View()
-    confirm_btn = discord.ui.Button(
-        label="削除", style=discord.ButtonStyle.danger
-    )
-    cancel_btn = discord.ui.Button(
-        label="キャンセル", style=discord.ButtonStyle.secondary
-    )
+        async def confirm_callback(inter: discord.Interaction):
+            del vending_machines[self.v_id]["items"][item_id]
+            await inter.response.edit_message(content=f"選択した商品「{item_name}」を削除しました。", view=None)
 
-    async def confirm_callback(inter: discord.Interaction):
-      del vending_machines[self.v_id]["items"][item_id]
-      await inter.response.edit_message(
-          content=f"選択した商品「{item_name}」を削除しました。", view=None
-      )
+        async def cancel_callback(inter: discord.Interaction):
+            await inter.response.edit_message(content="処理をキャンセルしました。", view=None)
 
-    async def cancel_callback(inter: discord.Interaction):
-      await inter.response.edit_message(content="処理をキャンセルしました。", view=None)
+        confirm_btn.callback = confirm_callback
+        cancel_btn.callback = cancel_callback
+        view.add_item(confirm_btn)
+        view.add_item(cancel_btn)
 
-    confirm_btn.callback = confirm_callback
-    cancel_btn.callback = cancel_callback
-    view.add_item(confirm_btn)
-    view.add_item(cancel_btn)
-
-    await interaction.response.send_message(
-        "本当に削除しますか？\n実行した場合この操作は取り消せません。",
-        view=view,
-        ephemeral=True,
-    )
+        await interaction.response.send_message("本当に削除しますか？\n実行した場合この操作は取り消せません。", view=view, ephemeral=True)
 
 
 # ----------------------------------------------------
 # 5. スラッシュコマンド群
 # ----------------------------------------------------
 
-
 @bot.event
 async def on_ready():
-  await bot.tree.sync()
-  print(f"ログイン完了: {bot.user}")
+    global paypay_client
+    # PayPayトークンのセットアップ
+    paypay_token = os.getenv("PAYPAY_TOKEN")
+    if paypay_token:
+        paypay_client = PayPay(access_token=paypay_token)
+        print("PayPayクライアントの初期化が完了しました。")
+    else:
+        print("警告: PAYPAY_TOKEN が設定されていません。")
+
+    await bot.tree.sync()
+    print(f"ログイン完了: {bot.user}")
 
 
 # /自販機作成
 @bot.tree.command(name="自販機作成", description="自販機を作成")
 @app_commands.describe(name="自販機の名前")
-async def create_vending_machine(
-    interaction: discord.Interaction, name: str
-):
-  v_id = str(uuid.uuid4())
-  vending_machines[v_id] = {"name": name, "items": {}}
-  await interaction.response.send_message(
-      f"自販機「{name}」を作成しました。(ID: `{v_id}`)", ephemeral=True
-  )
+async def create_vending_machine(interaction: discord.Interaction, name: str):
+    v_id = str(uuid.uuid4())
+    vending_machines[v_id] = {"name": name, "items": {}}
+    await interaction.response.send_message(f"自販機「{name}」を作成しました。(ID: `{v_id}`)", ephemeral=True)
 
 
 # /自販機削除
-@bot.tree.command(
-    name="自販機削除", description="自販機を完全に削除します。"
-)
+@bot.tree.command(name="自販機削除", description="自販機を完全に削除します。")
 @app_commands.describe(vending_machine_id="削除する自販機")
 @app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
-async def delete_vending_machine(
-    interaction: discord.Interaction, vending_machine_id: str
-):
-  if vending_machine_id not in vending_machines:
-    await interaction.response.send_message(
-        "指定された自販機が見つかりません。", ephemeral=True
-    )
-    return
+async def delete_vending_machine(interaction: discord.Interaction, vending_machine_id: str):
+    if vending_machine_id not in vending_machines:
+        await interaction.response.send_message("指定された自販機が見つかりません。", ephemeral=True)
+        return
 
-  target_name = vending_machines[vending_machine_id]["name"]
-  embed = discord.Embed(
-      title="# 自販機削除確認",
-      description=(
-          f"本当に自販機「{target_name}」を削除しますか？\n**この操作は取り消せません。\nすべての商品と在庫のデータも削除されます。**"
-      ),
-      color=discord.Color.red(),
-  )
-
-  view = discord.ui.View()
-  delete_btn = discord.ui.Button(
-      label="削除する", style=discord.ButtonStyle.danger
-  )
-  cancel_btn = discord.ui.Button(
-      label="キャンセル", style=discord.ButtonStyle.secondary
-  )
-
-  async def delete_cb(inter: discord.Interaction):
-    del vending_machines[vending_machine_id]
-    await inter.response.edit_message(
-        content=f"自販機「{target_name}」を完全に削除しました。",
-        embed=None,
-        view=None,
+    target_name = vending_machines[vending_machine_id]["name"]
+    embed = discord.Embed(
+        title="# 自販機削除確認",
+        description=f"本当に自販機「{target_name}」を削除しますか？\n**この操作は取り消せません。\nすべての商品と在庫のデータも削除されます。**",
+        color=discord.Color.red(),
     )
 
-  async def cancel_cb(inter: discord.Interaction):
-    await inter.response.edit_message(content="削除をキャンセルしました。", embed=None, view=None)
+    view = discord.ui.View()
+    delete_btn = discord.ui.Button(label="削除する", style=discord.ButtonStyle.danger)
+    cancel_btn = discord.ui.Button(label="キャンセル", style=discord.ButtonStyle.secondary)
 
-  delete_btn.callback = delete_cb
-  cancel_btn.callback = cancel_cb
-  view.add_item(delete_btn)
-  view.add_item(cancel_btn)
+    async def delete_cb(inter: discord.Interaction):
+        del vending_machines[vending_machine_id]
+        await inter.response.edit_message(content=f"自販機「{target_name}」を完全に削除しました。", embed=None, view=None)
 
-  await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    async def cancel_cb(inter: discord.Interaction):
+        await inter.response.edit_message(content="削除をキャンセルしました。", embed=None, view=None)
+
+    delete_btn.callback = delete_cb
+    cancel_btn.callback = cancel_cb
+    view.add_item(delete_btn)
+    view.add_item(cancel_btn)
+
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # /自販機設置
 @bot.tree.command(name="自販機設置", description="自販機を設置します")
-@app_commands.describe(
-    vending_machine_id="設置する自販機",
-    panel_title="パネルのタイトル",
-    panel_description="パネルの説明文",
-)
+@app_commands.describe(vending_machine_id="設置する自販機", panel_title="パネルのタイトル", panel_description="パネルの説明文")
 @app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
-async def place_vending_machine(
-    interaction: discord.Interaction,
-    vending_machine_id: str,
-    panel_title: str = None,
-    panel_description: str = None,
-):
-  if vending_machine_id not in vending_machines:
-    await interaction.response.send_message(
-        "指定された自販機が見つかりません。", ephemeral=True
-    )
-    return
+async def place_vending_machine(interaction: discord.Interaction, vending_machine_id: str, panel_title: str = None, panel_description: str = None):
+    if vending_machine_id not in vending_machines:
+        await interaction.response.send_message("指定された自販機が見つかりません。", ephemeral=True)
+        return
 
-  vm_data = vending_machines[vending_machine_id]
-  title = panel_title if panel_title else vm_data["name"]
-  embed = discord.Embed(title=title, color=discord.Color.green())
+    vm_data = vending_machines[vending_machine_id]
+    title = panel_title if panel_title else vm_data["name"]
+    embed = discord.Embed(title=title, color=discord.Color.green())
 
-  if panel_description:
-    embed.description = panel_description
+    if panel_description:
+        embed.description = panel_description
 
-  for item_id, item in vm_data["items"].items():
-    price_info = f"マネー:{item['money']}マネーライト:{item['manera']}"
-    desc = f"{item['description']}\n" if item.get("description") else ""
-    emoji_str = f"{item['emoji']} " if item.get("emoji") else ""
-    embed.add_field(
-        name=f"{emoji_str}{item['name']}",
-        value=f"{desc}{price_info}",
-        inline=False,
-    )
+    for item_id, item in vm_data["items"].items():
+        price_info = f"マネー:{item['money']}円 / マネーライト:{item['manera']}円"
+        desc = f"{item['description']}\n" if item.get("description") else ""
+        emoji_str = f"{item['emoji']} " if item.get("emoji") else ""
+        embed.add_field(name=f"{emoji_str}{item['name']}", value=f"{desc}{price_info}", inline=False)
 
-  view = discord.ui.View()
-  buy_btn = discord.ui.Button(
-      label="🛒購入する", style=discord.ButtonStyle.success
-  )
-  stock_btn = discord.ui.Button(
-      label="在庫確認", style=discord.ButtonStyle.danger
-  )
+    view = discord.ui.View()
+    buy_btn = discord.ui.Button(label="🛒購入する", style=discord.ButtonStyle.success)
+    stock_btn = discord.ui.Button(label="在庫確認", style=discord.ButtonStyle.danger)
 
-  async def buy_cb(inter: discord.Interaction):
-    options = [
-        discord.SelectOption(
-            label=data["name"], value=data["name"], emoji=data.get("emoji")
-        )
-        for data in vm_data["items"].values()
-    ]
-    if not options:
-      await inter.response.send_message(
-          "商品が登録されていません。", ephemeral=True
-      )
-      return
+    async def buy_cb(inter: discord.Interaction):
+        options = [
+            discord.SelectOption(label=data["name"], value=i_id, emoji=data.get("emoji"))
+            for i_id, data in vm_data["items"].items()
+        ]
+        if not options:
+            await inter.response.send_message("商品が登録されていません。", ephemeral=True)
+            return
 
-    select = discord.ui.Select(
-        placeholder="購入する商品を選択", options=options
-    )
+        select = discord.ui.Select(placeholder="購入する商品を選択", options=options)
 
-    async def select_cb(s_inter: discord.Interaction):
-      p_view = discord.ui.View()
-      p_view.add_item(PaymentSelect(select.values[0]))
-      await s_inter.response.send_message(
-          "決済方法を選択してください。", view=p_view, ephemeral=True
-      )
+        async def select_cb(s_inter: discord.Interaction):
+            selected_item_id = select.values[0]
+            p_view = discord.ui.View()
+            p_view.add_item(PaymentSelect(vending_machine_id, selected_item_id))
+            await s_inter.response.send_message("決済方法を選択してください。", view=p_view, ephemeral=True)
 
-    select.callback = select_cb
-    item_view = discord.ui.View()
-    item_view.add_item(select)
-    await inter.response.send_message(
-        "商品を選択してください", view=item_view, ephemeral=True
-    )
+        select.callback = select_cb
+        item_view = discord.ui.View()
+        item_view.add_item(select)
+        await inter.response.send_message("商品を選択してください", view=item_view, ephemeral=True)
 
-  async def stock_cb(inter: discord.Interaction):
-    stock_info = []
-    for i_id, i_data in vm_data["items"].items():
-      stock_num = (
-          "無限"
-          if i_data["type"] == "無限"
-          else str(len(i_data.get("stock_list", [])))
-      )
-      stock_info.append(f"**{i_data['name']}**\n在庫:{stock_num}")
+    async def stock_cb(inter: discord.Interaction):
+        stock_info = []
+        for i_id, i_data in vm_data["items"].items():
+            stock_num = "無限" if i_data["type"] == "無限" else str(len(i_data.get("stock_list", [])))
+            stock_info.append(f"**{i_data['name']}**\n在庫:{stock_num}")
 
-    msg = "\n\n".join(stock_info) if stock_info else "商品が登録されていません。"
-    await inter.response.send_message(msg, ephemeral=True)
+        msg = "\n\n".join(stock_info) if stock_info else "商品が登録されていません。"
+        await inter.response.send_message(msg, ephemeral=True)
 
-  buy_btn.callback = buy_cb
-  stock_btn.callback = stock_cb
-  view.add_item(buy_btn)
-  view.add_item(stock_btn)
+    buy_btn.callback = buy_cb
+    stock_btn.callback = stock_cb
+    view.add_item(buy_btn)
+    view.add_item(stock_btn)
 
-  await interaction.response.send_message(embed=embed, view=view)
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 # /商品追加
 @bot.tree.command(name="商品追加", description="自販機に商品を追加")
-@app_commands.describe(
-    vending_machine_id="商品を追加する自販機",
-    type="商品タイプ",
-    monay="マネーの値段",
-    manera="マネーライトの金額",
-    name="商品名",
-    description="商品説明文",
-    emoji="一絵文字のみ",
-)
-@app_commands.choices(
-    type=[
-        app_commands.Choice(name="有限", value="有限"),
-        app_commands.Choice(name="無限", value="無限"),
-    ]
-)
+@app_commands.describe(vending_machine_id="商品を追加する自販機", type="商品タイプ", monay="マネーの値段", manera="マネーライトの金額", name="商品名", description="商品説明文", emoji="一絵文字のみ")
+@app_commands.choices(type=[app_commands.Choice(name="有限", value="有限"), app_commands.Choice(name="無限", value="無限")])
 @app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
-async def add_item(
-    interaction: discord.Interaction,
-    vending_machine_id: str,
-    type: str,
-    monay: int,
-    manera: int,
-    name: str,
-    description: str = None,
-    emoji: str = None,
-):
-  if vending_machine_id not in vending_machines:
-    await interaction.response.send_message(
-        "指定された自販機が見つかりません。", ephemeral=True
-    )
-    return
+async def add_item(interaction: discord.Interaction, vending_machine_id: str, type: str, monay: int, manera: int, name: str, description: str = None, emoji: str = None):
+    if vending_machine_id not in vending_machines:
+        await interaction.response.send_message("指定された自販機が見つかりません。", ephemeral=True)
+        return
 
-  item_id = str(uuid.uuid4())
-  vending_machines[vending_machine_id]["items"][item_id] = {
-      "name": name,
-      "type": type,
-      "money": monay,
-      "manera": manera,
-      "description": description,
-      "emoji": emoji,
-      "stock_list": [],
-  }
+    item_id = str(uuid.uuid4())
+    vending_machines[vending_machine_id]["items"][item_id] = {
+        "name": name,
+        "type": type,
+        "money": monay,
+        "manera": manera,
+        "description": description,
+        "emoji": emoji,
+        "stock_list": [],
+    }
 
-  vm_name = vending_machines[vending_machine_id]["name"]
-  await interaction.response.send_message(
-      f"自販機「{vm_name}」に商品名「{name}」を追加しました。",
-      ephemeral=True,
-  )
+    vm_name = vending_machines[vending_machine_id]["name"]
+    await interaction.response.send_message(f"自販機「{vm_name}」に商品名「{name}」を追加しました。", ephemeral=True)
 
 
 # /商品内容変更
@@ -487,237 +558,157 @@ async def add_item(
 @app_commands.describe(vending_machine_id="対象の自販機")
 @app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 async def edit_item(interaction: discord.Interaction, vending_machine_id: str):
-  if (
-      vending_machine_id not in vending_machines
-      or not vending_machines[vending_machine_id]["items"]
-  ):
-    await interaction.response.send_message(
-        "指定された自販機が存在しないか、商品が登録されていません。",
-        ephemeral=True,
-    )
-    return
+    if vending_machine_id not in vending_machines or not vending_machines[vending_machine_id]["items"]:
+        await interaction.response.send_message("指定された自販機が存在しないか、商品が登録されていません。", ephemeral=True)
+        return
 
-  view = discord.ui.View()
-  view.add_item(EditItemSelect(vending_machine_id))
-  await interaction.response.send_message(
-      "内容を変更する商品を選択してください", view=view, ephemeral=True
-  )
+    view = discord.ui.View()
+    view.add_item(EditItemSelect(vending_machine_id))
+    await interaction.response.send_message("内容を変更する商品を選択してください", view=view, ephemeral=True)
 
 
 # /商品削除
 @bot.tree.command(name="商品削除", description="商品を削除")
 @app_commands.describe(vending_machine_id="削除する商品がある自販機")
 @app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
-async def delete_item(
-    interaction: discord.Interaction, vending_machine_id: str
-):
-  if (
-      vending_machine_id not in vending_machines
-      or not vending_machines[vending_machine_id]["items"]
-  ):
-    await interaction.response.send_message(
-        "指定された自販機が存在しないか、商品が登録されていません。",
-        ephemeral=True,
-    )
-    return
+async def delete_item(interaction: discord.Interaction, vending_machine_id: str):
+    if vending_machine_id not in vending_machines or not vending_machines[vending_machine_id]["items"]:
+        await interaction.response.send_message("指定された自販機が存在しないか、商品が登録されていません。", ephemeral=True)
+        return
 
-  view = discord.ui.View()
-  view.add_item(DeleteItemSelect(vending_machine_id))
-  await interaction.response.send_message(
-      "削除する商品を選択", view=view, ephemeral=True
-  )
+    view = discord.ui.View()
+    view.add_item(DeleteItemSelect(vending_machine_id))
+    await interaction.response.send_message("削除する商品を選択", view=view, ephemeral=True)
 
 
 # /在庫追加
-@bot.tree.command(
-    name="在庫追加", description="自販機に在庫を追加します"
-)
+@bot.tree.command(name="在庫追加", description="自販機に在庫を追加します")
 @app_commands.describe(vending_machine_id="在庫を追加する自販機")
 @app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
-async def add_stock(
-    interaction: discord.Interaction, vending_machine_id: str
-):
-  vm = vending_machines.get(vending_machine_id)
-  if not vm or not vm["items"]:
-    await interaction.response.send_message(
-        "自販機または商品が存在しません。", ephemeral=True
-    )
-    return
+async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
+    vm = vending_machines.get(vending_machine_id)
+    if not vm or not vm["items"]:
+        await interaction.response.send_message("自販機または商品が存在しません。", ephemeral=True)
+        return
 
-  options = [
-      discord.SelectOption(label=data["name"], value=i_id)
-      for i_id, data in vm["items"].items()
-  ]
-  select = discord.ui.Select(
-      placeholder="在庫を追加する商品を選択", options=options
-  )
+    options = [
+        discord.SelectOption(label=data["name"], value=i_id)
+        for i_id, data in vm["items"].items()
+    ]
+    select = discord.ui.Select(placeholder="在庫を追加する商品を選択", options=options)
 
-  async def select_callback(inter: discord.Interaction):
-    item_id = select.values[0]
-    item = vm["items"][item_id]
+    async def select_callback(inter: discord.Interaction):
+        item_id = select.values[0]
+        item = vm["items"][item_id]
 
-    class AddStockModal(discord.ui.Modal, title="在庫内容追加"):
-      content = discord.ui.TextInput(
-          label="商品内容*",
-          style=discord.TextStyle.paragraph,
-          placeholder="在庫の内容を入力",
-          required=True,
-      )
-      msg = discord.ui.TextInput(
-          label="送付用メッセージ",
-          style=discord.TextStyle.paragraph,
-          required=False,
-      )
+        class AddStockModal(discord.ui.Modal, title="在庫内容追加"):
+            content = discord.ui.TextInput(label="商品内容*", style=discord.TextStyle.paragraph, placeholder="在庫の内容を入力", required=True)
+            msg = discord.ui.TextInput(label="送付用メッセージ", style=discord.TextStyle.paragraph, required=False)
 
-      async def on_submit(self, m_inter: discord.Interaction):
-        if "stock_list" not in item:
-          item["stock_list"] = []
-        item["stock_list"].append(
-            {"content": self.content.value, "msg": self.msg.value}
-        )
+            async def on_submit(self, m_inter: discord.Interaction):
+                if "stock_list" not in item:
+                    item["stock_list"] = []
+                item["stock_list"].append({"content": self.content.value, "msg": self.msg.value})
 
-        msg_str = (
-            f"\n{self.msg.value}" if self.msg.value else ""
-        )
-        res_text = (
-            f"追加した商品はDMにて{msg_str}\n```\n{self.content.value}\n```"
-        )
-        await m_inter.response.send_message(res_text, ephemeral=True)
+                msg_str = f"\n{self.msg.value}" if self.msg.value else ""
+                res_text = f"追加した商品は購入時に送信されます:{msg_str}\n```\n{self.content.value}\n```"
+                await m_inter.response.send_message(res_text, ephemeral=True)
 
-    await inter.response.send_modal(AddStockModal())
+        await inter.response.send_modal(AddStockModal())
 
-  select.callback = select_callback
-  view = discord.ui.View()
-  view.add_item(select)
-  await interaction.response.send_message(
-      "商品を選択してください", view=view, ephemeral=True
-  )
+    select.callback = select_callback
+    view = discord.ui.View()
+    view.add_item(select)
+    await interaction.response.send_message("商品を選択してください", view=view, ephemeral=True)
 
 
 # /在庫内容確認
-@bot.tree.command(
-    name="在庫内容確認", description="自販機内のすべての在庫を出力"
-)
+@bot.tree.command(name="在庫内容確認", description="自販機内のすべての在庫を出力")
 @app_commands.describe(vending_machine_id="在庫の内容を確認する自販機")
 @app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
-async def check_stock(
-    interaction: discord.Interaction, vending_machine_id: str
-):
-  vm = vending_machines.get(vending_machine_id)
-  if not vm:
-    await interaction.response.send_message(
-        "自販機が見つかりません。", ephemeral=True
-    )
-    return
+async def check_stock(interaction: discord.Interaction, vending_machine_id: str):
+    vm = vending_machines.get(vending_machine_id)
+    if not vm:
+        await interaction.response.send_message("自販機が見つかりません。", ephemeral=True)
+        return
 
-  lines = []
-  for i_data in vm["items"].values():
-    for st in i_data.get("stock_list", []):
-      lines.append(f"```\n{st['content']}\n```")
+    lines = []
+    for i_data in vm["items"].values():
+        for st in i_data.get("stock_list", []):
+            lines.append(f"```\n{st['content']}\n```")
 
-  res = "\n".join(lines) if lines else "在庫はありません。"
-  await interaction.response.send_message(res, ephemeral=True)
+    res = "\n".join(lines) if lines else "在庫はありません。"
+    await interaction.response.send_message(res, ephemeral=True)
 
 
 # /在庫引出
 @bot.tree.command(name="在庫引出", description="指定数の在庫を引き出します")
-@app_commands.describe(
-    vending_machine_id="在庫を引き出す自販機", quantity="引き出す個数"
-)
+@app_commands.describe(vending_machine_id="在庫を引き出す自販機", quantity="引き出す個数")
 @app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
-async def withdraw_stock(
-    interaction: discord.Interaction,
-    vending_machine_id: str,
-    quantity: int,
-):
-  vm = vending_machines.get(vending_machine_id)
-  if not vm or not vm["items"]:
-    await interaction.response.send_message(
-        "自販機または商品がありません。", ephemeral=True
-    )
-    return
+async def withdraw_stock(interaction: discord.Interaction, vending_machine_id: str, quantity: int):
+    vm = vending_machines.get(vending_machine_id)
+    if not vm or not vm["items"]:
+        await interaction.response.send_message("自販機または商品がありません。", ephemeral=True)
+        return
 
-  options = [
-      discord.SelectOption(label=data["name"], value=i_id)
-      for i_id, data in vm["items"].items()
-  ]
-  select = discord.ui.Select(
-      placeholder="引き出す商品を選択", options=options
-  )
+    options = [
+        discord.SelectOption(label=data["name"], value=i_id)
+        for i_id, data in vm["items"].items()
+    ]
+    select = discord.ui.Select(placeholder="引き出す商品を選択", options=options)
 
-  async def select_callback(inter: discord.Interaction):
-    item_id = select.values[0]
-    item = vm["items"][item_id]
-    stock_list = item.get("stock_list", [])
+    async def select_callback(inter: discord.Interaction):
+        item_id = select.values[0]
+        item = vm["items"][item_id]
+        stock_list = item.get("stock_list", [])
 
-    if len(stock_list) < quantity:
-      await inter.response.send_message(
-          f"在庫が足りません。(現在: {len(stock_list)}個)", ephemeral=True
-      )
-      return
+        if len(stock_list) < quantity:
+            await inter.response.send_message(f"在庫が足りません。(現在: {len(stock_list)}個)", ephemeral=True)
+            return
 
-    drawn = stock_list[:quantity]
-    item["stock_list"] = stock_list[quantity:]
+        drawn = stock_list[:quantity]
+        item["stock_list"] = stock_list[quantity:]
 
-    drawn_text = "\n".join([f"```\n{d['content']}\n```" for d in drawn])
-    await inter.response.send_message(
-        f"在庫「\n{drawn_text}\n」を引き出しました。", ephemeral=True
-    )
+        drawn_text = "\n".join([f"```\n{d['content']}\n```" for d in drawn])
+        await inter.response.send_message(f"在庫「\n{drawn_text}\n」を引き出しました。", ephemeral=True)
 
-  select.callback = select_callback
-  view = discord.ui.View()
-  view.add_item(select)
-  await interaction.response.send_message(
-      "商品を選択してください", view=view, ephemeral=True
-  )
+    select.callback = select_callback
+    view = discord.ui.View()
+    view.add_item(select)
+    await interaction.response.send_message("商品を選択してください", view=view, ephemeral=True)
 
 
 # /クーポン作成
-@bot.tree.command(
-    name="クーポン作成", description="クーポンを作成します"
-)
-@app_commands.describe(
-    vending_machine_id="クーポンを利用できる自販機",
-    code="クーポンコード",
-    coupon="適用金額",
-)
+@bot.tree.command(name="クーポン作成", description="クーポンを作成します")
+@app_commands.describe(vending_machine_id="クーポンを利用できる自販機", code="クーポンコード", coupon="適用金額")
 @app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
-async def create_coupon(
-    interaction: discord.Interaction,
-    vending_machine_id: str,
-    code: str,
-    coupon: int,
-):
-  coupons[code] = {"vm_id": vending_machine_id, "amount": coupon}
-  await interaction.response.send_message(
-      f"クーポンコード「{code}」を作成しました。\n"
-      f"利用可能自販機: ```\n{vending_machine_id}\n```\n"
-      f"クーポンコード: ```\n{code}\n```\n"
-      f"適用金額: ```\n{coupon}\n```",
-      ephemeral=True,
-  )
+async def create_coupon(interaction: discord.Interaction, vending_machine_id: str, code: str, coupon: int):
+    coupons[code] = {"vm_id": vending_machine_id, "amount": coupon}
+    await interaction.response.send_message(
+        f"クーポンコード「{code}」を作成しました。\n"
+        f"利用可能自販機: ```\n{vending_machine_id}\n```\n"
+        f"クーポンコード: ```\n{code}\n```\n"
+        f"適用金額: ```\n{coupon}\n```",
+        ephemeral=True,
+    )
 
 
 # /クーポン一覧
-@bot.tree.command(
-    name="クーポン一覧", description="利用可能なクーポン一覧を表示"
-)
+@bot.tree.command(name="クーポン一覧", description="利用可能なクーポン一覧を表示")
 async def list_coupons(interaction: discord.Interaction):
-  if not coupons:
-    await interaction.response.send_message(
-        "クーポンはありません。", ephemeral=True
-    )
-    return
+    if not coupons:
+        await interaction.response.send_message("クーポンはありません。", ephemeral=True)
+        return
 
-  lines = []
-  for code, data in coupons.items():
-    lines.append(
-        f"利用可能自販機: ```\n{data['vm_id']}\n```\n"
-        f"クーポンコード: ```\n{code}\n```\n"
-        f"適用金額: ```\n{data['amount']}\n```"
-    )
+    lines = []
+    for code, data in coupons.items():
+        lines.append(
+            f"利用可能自販機: ```\n{data['vm_id']}\n```\n"
+            f"クーポンコード: ```\n{code}\n```\n"
+            f"適用金額: ```\n{data['amount']}\n```"
+        )
 
-  await interaction.response.send_message("\n\n".join(lines), ephemeral=True)
+    await interaction.response.send_message("\n\n".join(lines), ephemeral=True)
 
 
 # /クーポン削除
@@ -725,61 +716,45 @@ async def list_coupons(interaction: discord.Interaction):
 @app_commands.describe(code="削除するクーポンコード")
 @app_commands.autocomplete(code=coupon_autocomplete)
 async def delete_coupon(interaction: discord.Interaction, code: str):
-  if code not in coupons:
-    await interaction.response.send_message(
-        "指定されたクーポンが存在しません。", ephemeral=True
-    )
-    return
+    if code not in coupons:
+        await interaction.response.send_message("指定されたクーポンが存在しません。", ephemeral=True)
+        return
 
-  data = coupons[code]
-  embed = discord.Embed(
-      title="本当に削除しますか？\nこの動作は取り消せません。",
-      color=discord.Color.red(),
-  )
-  embed.description = (
-      f"利用可能自販機: ```\n{data['vm_id']}\n```\n"
-      f"クーポンコード: ```\n{code}\n```\n"
-      f"適用金額: ```\n{data['amount']}\n```"
-  )
-
-  view = discord.ui.View()
-  confirm_btn = discord.ui.Button(
-      label="削除する", style=discord.ButtonStyle.danger
-  )
-  cancel_btn = discord.ui.Button(
-      label="キャンセル", style=discord.ButtonStyle.secondary
-  )
-
-  async def confirm_cb(inter: discord.Interaction):
-    del coupons[code]
-    res_embed = discord.Embed(
-        title="クーポンコードの削除が完了しました。",
-        color=discord.Color.green(),
-    )
-    await inter.response.edit_message(embed=res_embed, view=None)
-
-  async def cancel_cb(inter: discord.Interaction):
-    await inter.response.edit_message(
-        content="処理をキャンセルしました。", embed=None, view=None
+    data = coupons[code]
+    embed = discord.Embed(title="本当に削除しますか？\nこの動作は取り消せません。", color=discord.Color.red())
+    embed.description = (
+        f"利用可能自販機: ```\n{data['vm_id']}\n```\n"
+        f"クーポンコード: ```\n{code}\n```\n"
+        f"適用金額: ```\n{data['amount']}\n```"
     )
 
-  confirm_btn.callback = confirm_cb
-  cancel_btn.callback = cancel_cb
-  view.add_item(confirm_btn)
-  view.add_item(cancel_btn)
+    view = discord.ui.View()
+    confirm_btn = discord.ui.Button(label="削除する", style=discord.ButtonStyle.danger)
+    cancel_btn = discord.ui.Button(label="キャンセル", style=discord.ButtonStyle.secondary)
 
-  await interaction.response.send_message(
-      embed=embed, view=view, ephemeral=True
-  )
+    async def confirm_cb(inter: discord.Interaction):
+        del coupons[code]
+        res_embed = discord.Embed(title="クーポンコードの削除が完了しました。", color=discord.Color.green())
+        await inter.response.edit_message(embed=res_embed, view=None)
+
+    async def cancel_cb(inter: discord.Interaction):
+        await inter.response.edit_message(content="処理をキャンセルしました。", embed=None, view=None)
+
+    confirm_btn.callback = confirm_cb
+    cancel_btn.callback = cancel_cb
+    view.add_item(confirm_btn)
+    view.add_item(cancel_btn)
+
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ----------------------------------------------------
-# 6. 起動処理 (環境変数 DISCORD_TOKEN)
+# 6. 起動処理
 # ----------------------------------------------------
 if __name__ == "__main__":
-  keep_alive()
-  TOKEN = os.getenv("DISCORD_TOKEN")
-  if TOKEN:
-    bot.run(TOKEN)
-  else:
-    print("エラー: DISCORD_TOKEN が設定されていません。")
+    keep_alive()
+    TOKEN = os.getenv("DISCORD_TOKEN")
+    if TOKEN:
+        bot.run(TOKEN)
+    else:
+        print("エラー: DISCORD_TOKEN が設定されていません。")
