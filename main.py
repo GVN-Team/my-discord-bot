@@ -424,9 +424,9 @@ class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
         global paypay_client
 
         try:
-            self.temp_paypay.login(otp=self.otp.value)[span_1](start_span)[span_1](end_span)
+            self.temp_paypay.login(otp=self.otp.value)
             paypay_client = self.temp_paypay
-            token = self.temp_paypay.access_token[span_2](start_span)[span_2](end_span)
+            token = self.temp_paypay.access_token
 
             await interaction.followup.send(
                 f"✅ **PayPayログインに成功しました！**\n"
@@ -436,8 +436,8 @@ class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
                 f"```\n{token}\n```",
                 ephemeral=True
             )
-        except PayPayLoginError as e:[span_3](start_span)[span_3](end_span)
-            await interaction.followup.send(f"❌ 認証エラー: 認証コードが正しいか確認してください。\n詳細: {e}", ephemeral=True)[span_4](start_span)[span_4](end_span)
+        except PayPayLoginError as e:
+            await interaction.followup.send(f"❌ 認証エラー: 認証コードが正しいか確認してください。\n詳細: {e}", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ ログイン処理エラー: {e}", ephemeral=True)
 
@@ -450,43 +450,43 @@ async def on_ready():
     global paypay_client
     paypay_token = os.getenv("PAYPAY_TOKEN")
     if paypay_token:
-        paypay_client = PayPay(access_token=paypay_token)[span_5](start_span)[span_5](end_span)
+        paypay_client = PayPay(access_token=paypay_token)
         print("PayPayクライアントの初期化が完了しました。")
     else:
         print("警告: PAYPAY_TOKEN が設定されていません。")
 
-    await bot.tree.sync()[span_6](start_span)[span_6](end_span)
+    await bot.tree.sync()
     print(f"ログイン完了: {bot.user}")
 
 
-@bot.tree.command(name="paypay_login", description="PayPayにログインしてBotの受取機能を有効化します（管理者用）")[span_7](start_span)[span_7](end_span)
-@app_commands.describe(phone="PayPay登録電話番号(ハイフンなし)", password="PayPayパスワード")[span_8](start_span)[span_8](end_span)
+@bot.tree.command(name="paypay_login", description="PayPayにログインしてBotの受取機能を有効化します（管理者用）")
+@app_commands.describe(phone="PayPay登録電話番号(ハイフンなし)", password="PayPayパスワード")
 async def paypay_login_cmd(interaction: discord.Interaction, phone: str, password: str):
     await interaction.response.defer(ephemeral=True)
 
     try:
-        temp_paypay = PayPay(phone=phone, password=password)[span_9](start_span)[span_9](end_span)
-        await interaction.followup.send_modal(PayPayOTPModal(temp_paypay))[span_10](start_span)[span_10](end_span)
+        temp_paypay = PayPay(phone=phone, password=password)
+        await interaction.followup.send_modal(PayPayOTPModal(temp_paypay))
 
-    except PayPayLoginError as e:[span_11](start_span)[span_11](end_span)
-        await interaction.followup.send(f"❌ ログイン失敗: 電話番号またはパスワードが違います。\n詳細: {e}", ephemeral=True)[span_12](start_span)[span_12](end_span)
-    except PayPayNetWorkError as e:[span_13](start_span)[span_13](end_span)
-        await interaction.followup.send(f"❌ ネットワークエラーが発生しました。\n詳細: {e}", ephemeral=True)[span_14](start_span)[span_14](end_span)
+    except PayPayLoginError as e:
+        await interaction.followup.send(f"❌ ログイン失敗: 電話番号またはパスワードが違います。\n詳細: {e}", ephemeral=True)
+    except PayPayNetWorkError as e:
+        await interaction.followup.send(f"❌ ネットワークエラーが発生しました。\n詳細: {e}", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ エラーが発生しました: {e}", ephemeral=True)
 
 
-@bot.tree.command(name="自販機作成", description="自販機を作成")[span_15](start_span)[span_15](end_span)
-@app_commands.describe(name="自販機の名前")[span_16](start_span)[span_16](end_span)
+@bot.tree.command(name="自販機作成", description="自販機を作成")
+@app_commands.describe(name="自販機の名前")
 async def create_vending_machine(interaction: discord.Interaction, name: str):
     v_id = str(uuid.uuid4())
     vending_machines[v_id] = {"name": name, "items": {}}
     await interaction.response.send_message(f"自販機「{name}」を作成しました。(ID: `{v_id}`)", ephemeral=True)
 
 
-@bot.tree.command(name="自販機削除", description="自販機を完全に削除します。")[span_17](start_span)[span_17](end_span)
-@app_commands.describe(vending_machine_id="削除する自販機")[span_18](start_span)[span_18](end_span)
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)[span_19](start_span)[span_19](end_span)
+@bot.tree.command(name="自販機削除", description="自販機を完全に削除します。")
+@app_commands.describe(vending_machine_id="削除する自販機")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 async def delete_vending_machine(interaction: discord.Interaction, vending_machine_id: str):
     if vending_machine_id not in vending_machines:
         await interaction.response.send_message("指定された自販機が見つかりません。", ephemeral=True)
@@ -518,9 +518,9 @@ async def delete_vending_machine(interaction: discord.Interaction, vending_machi
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-@bot.tree.command(name="自販機設置", description="自販機を設置します")[span_20](start_span)[span_20](end_span)
-@app_commands.describe(vending_machine_id="設置する自販機", panel_title="パネルのタイトル", panel_description="パネルの説明文")[span_21](start_span)[span_21](end_span)
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)[span_22](start_span)[span_22](end_span)
+@bot.tree.command(name="自販機設置", description="自販機を設置します")
+@app_commands.describe(vending_machine_id="設置する自販機", panel_title="パネルのタイトル", panel_description="パネルの説明文")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 async def place_vending_machine(interaction: discord.Interaction, vending_machine_id: str, panel_title: str = None, panel_description: str = None):
     if vending_machine_id not in vending_machines:
         await interaction.response.send_message("指定された自販機が見つかりません。", ephemeral=True)
@@ -582,10 +582,10 @@ async def place_vending_machine(interaction: discord.Interaction, vending_machin
     await interaction.response.send_message(embed=embed, view=view)
 
 
-@bot.tree.command(name="商品追加", description="自販機に商品を追加")[span_23](start_span)[span_23](end_span)
-@app_commands.describe(vending_machine_id="商品を追加する自販機", type="商品タイプ", monay="マネーの値段", manera="マネーライトの金額", name="商品名", description="商品説明文", emoji="一絵文字のみ")[span_24](start_span)[span_24](end_span)
-@app_commands.choices(type=[app_commands.Choice(name="有限", value="有限"), app_commands.Choice(name="無限", value="無限")])[span_25](start_span)[span_25](end_span)
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)[span_26](start_span)[span_26](end_span)
+@bot.tree.command(name="商品追加", description="自販機に商品を追加")
+@app_commands.describe(vending_machine_id="商品を追加する自販機", type="商品タイプ", monay="マネーの値段", manera="マネーライトの金額", name="商品名", description="商品説明文", emoji="一絵文字のみ")
+@app_commands.choices(type=[app_commands.Choice(name="有限", value="有限"), app_commands.Choice(name="無限", value="無限")])
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 async def add_item(interaction: discord.Interaction, vending_machine_id: str, type: str, monay: int, manera: int, name: str, description: str = None, emoji: str = None):
     if vending_machine_id not in vending_machines:
         await interaction.response.send_message("指定された自販機が見つかりません。", ephemeral=True)
@@ -606,9 +606,9 @@ async def add_item(interaction: discord.Interaction, vending_machine_id: str, ty
     await interaction.response.send_message(f"自販機「{vm_name}」に商品名「{name}」を追加しました。", ephemeral=True)
 
 
-@bot.tree.command(name="商品内容変更", description="商品の内容を変更")[span_27](start_span)[span_27](end_span)
-@app_commands.describe(vending_machine_id="対象の自販機")[span_28](start_span)[span_28](end_span)
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)[span_29](start_span)[span_29](end_span)
+@bot.tree.command(name="商品内容変更", description="商品の内容を変更")
+@app_commands.describe(vending_machine_id="対象の自販機")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 async def edit_item(interaction: discord.Interaction, vending_machine_id: str):
     if vending_machine_id not in vending_machines or not vending_machines[vending_machine_id]["items"]:
         await interaction.response.send_message("指定された自販機が存在しないか、商品が登録されていません。", ephemeral=True)
@@ -619,9 +619,9 @@ async def edit_item(interaction: discord.Interaction, vending_machine_id: str):
     await interaction.response.send_message("内容を変更する商品を選択してください", view=view, ephemeral=True)
 
 
-@bot.tree.command(name="商品削除", description="商品を削除")[span_30](start_span)[span_30](end_span)
-@app_commands.describe(vending_machine_id="削除する商品がある自販機")[span_31](start_span)[span_31](end_span)
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)[span_32](start_span)[span_32](end_span)
+@bot.tree.command(name="商品削除", description="商品を削除")
+@app_commands.describe(vending_machine_id="削除する商品がある自販機")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 async def delete_item(interaction: discord.Interaction, vending_machine_id: str):
     if vending_machine_id not in vending_machines or not vending_machines[vending_machine_id]["items"]:
         await interaction.response.send_message("指定された自販機が存在しないか、商品が登録されていません。", ephemeral=True)
@@ -632,9 +632,9 @@ async def delete_item(interaction: discord.Interaction, vending_machine_id: str)
     await interaction.response.send_message("削除する商品を選択", view=view, ephemeral=True)
 
 
-@bot.tree.command(name="在庫追加", description="自販機に在庫を追加します")[span_33](start_span)[span_33](end_span)
-@app_commands.describe(vending_machine_id="在庫を追加する自販機")[span_34](start_span)[span_34](end_span)
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)[span_35](start_span)[span_35](end_span)
+@bot.tree.command(name="在庫追加", description="自販機に在庫を追加します")
+@app_commands.describe(vending_machine_id="在庫を追加する自販機")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
     vm = vending_machines.get(vending_machine_id)
     if not vm or not vm["items"]:
@@ -672,9 +672,9 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
     await interaction.response.send_message("商品を選択してください", view=view, ephemeral=True)
 
 
-@bot.tree.command(name="在庫内容確認", description="自販機内のすべての在庫を出力")[span_36](start_span)[span_36](end_span)
-@app_commands.describe(vending_machine_id="在庫の内容を確認する自販機")[span_37](start_span)[span_37](end_span)
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)[span_38](start_span)[span_38](end_span)
+@bot.tree.command(name="在庫内容確認", description="自販機内のすべての在庫を出力")
+@app_commands.describe(vending_machine_id="在庫の内容を確認する自販機")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 async def check_stock(interaction: discord.Interaction, vending_machine_id: str):
     vm = vending_machines.get(vending_machine_id)
     if not vm:
@@ -690,9 +690,9 @@ async def check_stock(interaction: discord.Interaction, vending_machine_id: str)
     await interaction.response.send_message(res, ephemeral=True)
 
 
-@bot.tree.command(name="在庫引出", description="指定数の在庫を引き出します")[span_39](start_span)[span_39](end_span)
-@app_commands.describe(vending_machine_id="在庫を引き出す自販機", quantity="引き出す個数")[span_40](start_span)[span_40](end_span)
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)[span_41](start_span)[span_41](end_span)
+@bot.tree.command(name="在庫引出", description="指定数の在庫を引き出します")
+@app_commands.describe(vending_machine_id="在庫を引き出す自販機", quantity="引き出す個数")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 async def withdraw_stock(interaction: discord.Interaction, vending_machine_id: str, quantity: int):
     vm = vending_machines.get(vending_machine_id)
     if not vm or not vm["items"]:
@@ -726,9 +726,9 @@ async def withdraw_stock(interaction: discord.Interaction, vending_machine_id: s
     await interaction.response.send_message("商品を選択してください", view=view, ephemeral=True)
 
 
-@bot.tree.command(name="クーポン作成", description="クーポンを作成します")[span_42](start_span)[span_42](end_span)
-@app_commands.describe(vending_machine_id="クーポンを利用できる自販機", code="クーポンコード", coupon="適用金額")[span_43](start_span)[span_43](end_span)
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)[span_44](start_span)[span_44](end_span)
+@bot.tree.command(name="クーポン作成", description="クーポンを作成します")
+@app_commands.describe(vending_machine_id="クーポンを利用できる自販機", code="クーポンコード", coupon="適用金額")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 async def create_coupon(interaction: discord.Interaction, vending_machine_id: str, code: str, coupon: int):
     coupons[code] = {"vm_id": vending_machine_id, "amount": coupon}
     await interaction.response.send_message(
@@ -740,7 +740,7 @@ async def create_coupon(interaction: discord.Interaction, vending_machine_id: st
     )
 
 
-@bot.tree.command(name="クーポン一覧", description="利用可能なクーポン一覧を表示")[span_45](start_span)[span_45](end_span)
+@bot.tree.command(name="クーポン一覧", description="利用可能なクーポン一覧を表示")
 async def list_coupons(interaction: discord.Interaction):
     if not coupons:
         await interaction.response.send_message("クーポンはありません。", ephemeral=True)
@@ -757,9 +757,9 @@ async def list_coupons(interaction: discord.Interaction):
     await interaction.response.send_message("\n\n".join(lines), ephemeral=True)
 
 
-@bot.tree.command(name="クーポン削除", description="クーポンを削除します")[span_46](start_span)[span_46](end_span)
-@app_commands.describe(code="削除するクーポンコード")[span_47](start_span)[span_47](end_span)
-@app_commands.autocomplete(code=coupon_autocomplete)[span_48](start_span)[span_48](end_span)
+@bot.tree.command(name="クーポン削除", description="クーポンを削除します")
+@app_commands.describe(code="削除するクーポンコード")
+@app_commands.autocomplete(code=coupon_autocomplete)
 async def delete_coupon(interaction: discord.Interaction, code: str):
     if code not in coupons:
         await interaction.response.send_message("指定されたクーポンが存在しません。", ephemeral=True)
@@ -797,9 +797,9 @@ async def delete_coupon(interaction: discord.Interaction, code: str):
 # 6. 起動処理
 # ----------------------------------------------------
 if __name__ == "__main__":
-    keep_alive()[span_49](start_span)[span_49](end_span)
-    TOKEN = os.getenv("DISCORD_TOKEN")[span_50](start_span)[span_50](end_span)
+    keep_alive()
+    TOKEN = os.getenv("DISCORD_TOKEN")
     if TOKEN:
-        bot.run(TOKEN)[span_51](start_span)[span_51](end_span)
+        bot.run(TOKEN)
     else:
-        print("エラー: DISCORD_TOKEN が設定されていません。")[span_52](start_span)[span_52](end_span)
+        print("エラー: DISCORD_TOKEN が設定されていません。")
