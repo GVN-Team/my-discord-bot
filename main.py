@@ -427,6 +427,70 @@ async def create_vending_machine(interaction: discord.Interaction, name: str):
     vending_machines[v_id] = {"name": name, "items": {}}
     await interaction.response.send_message(f"自販機「{name}」を作成しました。(ID: `{v_id}`)", ephemeral=True)
 
+# ----------------------------------------------------
+# PayPay ログイン用 モーダル & コマンド
+# ----------------------------------------------------
+
+# OTP (認証コード) 入力用モーダル
+class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
+    otp = discord.ui.TextInput(
+        label="SMSに届いた認証コード*",
+        placeholder="6桁の数字",
+        required=True,
+        max_length=6
+    )
+
+    def __init__(self, temp_paypay: PayPay):
+        super().__init__()
+        self.temp_paypay = temp_paypay
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        global paypay_client
+
+        try:
+            # OTPを使ってログイン完了処理[span_1](start_span)[span_1](end_span)
+            self.temp_paypay.login(otp=self.otp.value)[span_2](start_span)[span_2](end_span)
+            
+            # グローバル変数にセット
+            paypay_client = self.temp_paypay
+
+            # Render環境変数への再設定を促すアナウンスとともにトークンを表示
+            token = self.temp_paypay.access_token[span_3](start_span)[span_3](end_span)
+            await interaction.followup.send(
+                f"✅ **PayPayログインに成功しました！**\n"
+                f"BotのPayPay連携が有効化されました。\n\n"
+                f"※Renderを再起動してもログインを維持したい場合は、"
+                f"Renderの環境変数 `PAYPAY_TOKEN` に以下のトークンを設定してください:\n"
+                f"```\n{token}\n```",
+                ephemeral=True
+            )
+        except PayPayLoginError as e:[span_4](start_span)[span_4](end_span)
+            await interaction.followup.send(f"❌ 認証エラー: 認証コードが正しいか確認してください。\n詳細: {e}", ephemeral=True)[span_5](start_span)[span_5](end_span)
+        except Exception as e:
+            await interaction.followup.send(f"❌ ログイン処理エラー: {e}", ephemeral=True)
+
+
+# /paypayログイン コマンド
+@bot.tree.command(name="paypay_login", description="PayPayにログインしてBotの受取機能を有効化します（管理者用）")
+@app_commands.describe(phone="PayPay登録電話番号(ハイフンなし)", password="PayPayパスワード")
+async def paypay_login_cmd(interaction: discord.Interaction, phone: str, password: str):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        # 電話番号とパスワードでOTP送信リクエスト[span_6](start_span)[span_6](end_span)
+        temp_paypay = PayPay(phone=phone, password=password)[span_7](start_span)[span_7](end_span)
+        
+        # OTP入力用モーダルを表示
+        await interaction.followup.send_modal(PayPayOTPModal(temp_paypay))
+
+    except PayPayLoginError as e:[span_8](start_span)[span_8](end_span)
+        await interaction.followup.send(f"❌ ログイン失敗: 電話番号またはパスワードが違います。\n詳細: {e}", ephemeral=True)[span_9](start_span)[span_9](end_span)
+    except PayPayNetWorkError as e:[span_10](start_span)[span_10](end_span)
+        await interaction.followup.send(f"❌ ネットワークエラーが発生しました。\n詳細: {e}", ephemeral=True)[span_11](start_span)[span_11](end_span)
+    except Exception as e:
+        await interaction.followup.send(f"❌ エラーが発生しました: {e}", ephemeral=True)
+
 
 # /自販機削除
 @bot.tree.command(name="自販機削除", description="自販機を完全に削除します。")
