@@ -464,19 +464,16 @@ async def on_ready():
 @bot.tree.command(name="paypay_login", description="PayPayにログインしてBotの受取機能を有効化します（管理者用）")
 @app_commands.describe(phone="PayPay登録電話番号(ハイフンなし)", password="PayPayパスワード")
 async def paypay_login_cmd(interaction: discord.Interaction, phone: str, password: str):
-    await interaction.response.defer(ephemeral=True)
-
     try:
         temp_paypay = PayPay(phone=phone, password=password)
-        await interaction.followup.send_modal(PayPayOTPModal(temp_paypay))
+        await interaction.response.send_modal(PayPayOTPModal(temp_paypay))
 
     except PayPayLoginError as e:
-        await interaction.followup.send(f"❌ ログイン失敗: 電話番号またはパスワードが違います。\n詳細: {e}", ephemeral=True)
+        await interaction.response.send_message(f"❌ ログイン失敗: 電話番号またはパスワードが違います。\n詳細: {e}", ephemeral=True)
     except PayPayNetWorkError as e:
-        await interaction.followup.send(f"❌ ネットワークエラーが発生しました。\n詳細: {e}", ephemeral=True)
+        await interaction.response.send_message(f"❌ ネットワークエラーが発生しました。\n詳細: {e}", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"❌ エラーが発生しました: {e}", ephemeral=True)
-
+        await interaction.response.send_message(f"❌ エラーが発生しました: {e}", ephemeral=True)
 
 @bot.tree.command(name="自販機作成", description="自販機を作成")
 @app_commands.describe(name="自販機の名前")
@@ -654,8 +651,19 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
         item = vm["items"][item_id]
 
         class AddStockModal(discord.ui.Modal, title="在庫内容追加"):
-            content = discord.ui.TextInput(label="商品内容*", style=discord.TextStyle.paragraph, placeholder="在庫の内容を入力", required=True)
-            msg = discord.ui.TextInput(label="送付用メッセージ", style=discord.TextStyle.paragraph, required=False)
+            content = discord.ui.TextInput(
+                label="商品内容*", 
+                style=discord.TextStyle.paragraph, 
+                placeholder="在庫の内容を入力", 
+                required=True,
+                max_length=1500
+            )
+            msg = discord.ui.TextInput(
+                label="送付用メッセージ", 
+                style=discord.TextStyle.paragraph, 
+                required=False,
+                max_length=300
+            )
 
             async def on_submit(self, m_inter: discord.Interaction):
                 if "stock_list" not in item:
@@ -688,8 +696,22 @@ async def check_stock(interaction: discord.Interaction, vending_machine_id: str)
         for st in i_data.get("stock_list", []):
             lines.append(f"```\n{st['content']}\n```")
 
-    res = "\n".join(lines) if lines else "在庫はありません。"
-    await interaction.response.send_message(res, ephemeral=True)
+    if not lines:
+        await interaction.response.send_message("在庫はありません。", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    current_msg = ""
+    for line in lines:
+        if len(current_msg) + len(line) + 1 > 1900:
+            await interaction.followup.send(current_msg, ephemeral=True)
+            current_msg = line
+        else:
+            current_msg += ("\n" + line) if current_msg else line
+
+    if current_msg:
+        await interaction.followup.send(current_msg, ephemeral=True)
 
 
 @bot.tree.command(name="在庫引出", description="指定数の在庫を引き出します")
