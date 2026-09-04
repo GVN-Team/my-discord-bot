@@ -23,6 +23,7 @@ def keep_alive():
     Thread(target=run).start()
 
 intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 vending_machines = {}
@@ -34,6 +35,60 @@ def parse_color(color_hex: str) -> discord.Color:
     if match:
         return discord.Color(int(match.group(1), 16))
     return discord.Color(0x5865F2)
+
+class CloseTicketButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.danger, label="🔒┋チケットを閉じる", custom_id="close_ticket_btn")
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message("このチケットチャンネルを削除します...", ephemeral=True)
+        await interaction.channel.delete()
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(CloseTicketButton())
+
+class TicketButton(discord.ui.Button):
+    def __init__(self, label: str, button_color: str):
+        style = discord.ButtonStyle.primary
+        if button_color.startswith("#"):
+            style = discord.ButtonStyle.primary
+
+        super().__init__(style=style, label=label, custom_id="create_ticket_btn")
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        user = interaction.user
+
+        channel_name = f"ticket-{user.name}"
+        existing_channel = discord.utils.get(guild.text_channels, name=channel_name)
+        if existing_channel:
+            await interaction.response.send_message(f"⚠️ すでにチケットチャンネルが存在します: {existing_channel.mention}", ephemeral=True)
+            return
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+
+        category = interaction.channel.category
+        ticket_channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites, category=category)
+
+        embed = discord.Embed(
+            title="お問い合わせチケット",
+            description=f"{user.mention} 様\nお問い合わせ内容を入力してお待ちください。\n対応が完了したら「チケットを閉じる」ボタンを押してください。",
+            color=discord.Color.blue()
+        )
+
+        await ticket_channel.send(embed=embed, view=TicketCloseView())
+        await interaction.response.send_message(f"✅ チケットを作成しました: {ticket_channel.mention}", ephemeral=True)
+
+class TicketView(discord.ui.View):
+    def __init__(self, label: str, button_color: str):
+        super().__init__(timeout=None)
+        self.add_item(TicketButton(label, button_color))
 
 class VerifyButton(discord.ui.Button):
     def __init__(self, role_id: int, label: str):
@@ -363,6 +418,32 @@ async def on_ready():
 
     await bot.tree.sync()
     print(f"Bot ログイン完了: {bot.user}")
+
+@bot.tree.command(name="ticket", description="チケットパネルを設置します")
+@app_commands.describe(
+    title="チケットパネルのタイトル",
+    description="チケットパネルの説明文",
+    buttonlabel="ボタンのラベル",
+    buttoncolor="ボタンの色(例:#abc123)"
+)
+async def ticket_cmd(
+    interaction: discord.Interaction,
+    title: str = None,
+    description: str = None,
+    buttonlabel: str = None,
+    buttoncolor: str = None
+):
+    final_title = title if title else "チケット発行"
+    final_desc = description if description else "下のボタンを押すとサポートチケットを作成できます。"
+    final_label = buttonlabel if buttonlabel else "📩┋チケットを作成"
+    color_hex = buttoncolor if buttoncolor else "#5865F2"
+
+    embed_color = parse_color(color_hex)
+    embed = discord.Embed(title=final_title, description=final_desc, color=embed_color)
+
+    view = TicketView(final_label, color_hex)
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("チケットパネルを設置しました。", ephemeral=True)
 
 @bot.tree.command(name="verify", description="サーバーの認証パネルを設置します")
 @app_commands.describe(
