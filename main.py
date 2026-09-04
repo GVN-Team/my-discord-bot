@@ -1,5 +1,6 @@
 import os
 import uuid
+import re
 from threading import Thread
 
 import discord
@@ -27,6 +28,40 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 vending_machines = {}
 coupons = {}
 paypay_client = None
+
+def parse_color(color_hex: str) -> discord.Color:
+    match = re.search(r"^#?([0-9a-fA-F]{6})$", color_hex)
+    if match:
+        return discord.Color(int(match.group(1), 16))
+    return discord.Color(0x5865F2)
+
+class VerifyButton(discord.ui.Button):
+    def __init__(self, role_id: int, label: str):
+        super().__init__(style=discord.ButtonStyle.primary, label=label, custom_id=f"verify_btn_{role_id}")
+        self.role_id = role_id
+
+    async def callback(self, interaction: discord.Interaction):
+        role = interaction.guild.get_role(self.role_id)
+        if not role:
+            await interaction.response.send_message("❌ 設定されたロールが見つかりませんでした。", ephemeral=True)
+            return
+
+        if role in interaction.user.roles:
+            await interaction.response.send_message("⚠️ 既に認証済みです（ロールを所有しています）。", ephemeral=True)
+            return
+
+        try:
+            await interaction.user.add_roles(role)
+            await interaction.response.send_message(f"✅ 認証が完了しました！ **{role.name}** を付与しました。", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ Botの権限が不足しているため、ロールを付与できませんでした。Botのロール順位を確認してください。", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ エラーが発生しました: {e}", ephemeral=True)
+
+class VerifyView(discord.ui.View):
+    def __init__(self, role_id: int, label: str):
+        super().__init__(timeout=None)
+        self.add_item(VerifyButton(role_id, label))
 
 async def vending_machine_autocomplete(interaction: discord.Interaction, current: str):
     return [
@@ -329,6 +364,34 @@ async def on_ready():
     await bot.tree.sync()
     print(f"Bot ログイン完了: {bot.user}")
 
+@bot.tree.command(name="verify", description="サーバーの認証パネルを設置します")
+@app_commands.describe(
+    role="付与するロール",
+    title="タイトル",
+    description="説明文",
+    buttonlabel="ボタンのラベル",
+    buttoncolor="ボタンの色(例:#abc123)"
+)
+async def verify_cmd(
+    interaction: discord.Interaction,
+    role: discord.Role,
+    title: str = None,
+    description: str = None,
+    buttonlabel: str = None,
+    buttoncolor: str = None
+):
+    final_title = title if title else "認証"
+    final_desc = description if description else f"ボタンを押すと{role.mention}が付与されます。"
+    final_label = buttonlabel if buttonlabel else "✅┋認証する"
+    color_hex = buttoncolor if buttoncolor else "#5865F2"
+
+    embed_color = parse_color(color_hex)
+    embed = discord.Embed(title=final_title, description=final_desc, color=embed_color)
+
+    view = VerifyView(role.id, final_label)
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("認証パネルを設置しました。", ephemeral=True)
+
 @bot.tree.command(name="paypay_login", description="PayPayにログインします（初回のみ1度だけ実行してください）")
 @app_commands.describe(phone="PayPay登録電話番号(ハイフンなし)", password="PayPayパスワード")
 async def paypay_login_cmd(interaction: discord.Interaction, phone: str, password: str):
@@ -402,7 +465,7 @@ async def place_vending_machine(interaction: discord.Interaction, vending_machin
         price_info = f"マネー:{item['money']}/マネーライト:{item['manera']}"
         desc = f"{item['description']}\n" if item.get("description") else ""
         emoji_str = f"{item['emoji']} " if item.get("emoji") else ""
-        embed.add_field(name=f"{emoji_str}{item['name']}", value=f"{desc}{price_info}", inline=False)
+        embed.add_field(name=f"枠の中に{price_info}", value=f"{emoji_str}**{item['name']}**\n{desc}", inline=False)
 
     view = VendingView(vending_machine_id)
     await interaction.response.send_message(embed=embed, view=view)
