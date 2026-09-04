@@ -1,4 +1,5 @@
 import os
+import json
 import uuid
 import datetime
 from typing import NamedTuple
@@ -10,6 +11,31 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from flask import Flask
+
+TOKEN_FILE = "paypay_tokens.json"
+
+# ----- トークン永続化（保存・読み込み）処理 -----
+def save_tokens(access_token: str, refresh_token: str, client_uuid: str):
+    """取得したトークンをローカルのJSONファイルに自動保存"""
+    data = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "client_uuid": client_uuid
+    }
+    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+    print("💾 トークン情報をローカルファイルに保存しました。")
+
+def load_tokens():
+    """保存されたトークン情報を読み込む"""
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"トークンファイルの読み込み失敗: {e}")
+    return None
+
 
 # ----- PayPaython クラス群 -----
 headers = {
@@ -30,10 +56,10 @@ class PayPayLoginError(Exception):
     pass
 
 class PayPay:
-    def __init__(self, phone: str = None, password: str = None, client_uuid: str = str(uuid4()).upper(), access_token: str = None, refresh_token: str = None, proxy: dict = None):
+    def __init__(self, phone: str = None, password: str = None, client_uuid: str = None, access_token: str = None, refresh_token: str = None, proxy: dict = None):
         self.session = requests.Session()
         self.proxy = proxy
-        self.client_uuid = client_uuid
+        self.client_uuid = client_uuid if client_uuid else str(uuid4()).upper()
         self.phone = phone
         self.password = password
         self.otp_prefix = None
@@ -60,6 +86,7 @@ class PayPay:
                     self.access_token = data.get("access_token")
                     self.refresh_token = data.get("refresh_token")
                     self.session.cookies.set("token", self.access_token)
+                    save_tokens(self.access_token, self.refresh_token, self.client_uuid)
                 elif "otp_prefix" in data or "otp_reference_id" in data:
                     self.otp_prefix = data.get("otp_prefix")
                     self.otp_reference_id = data.get("otp_reference_id")
@@ -71,9 +98,9 @@ class PayPay:
                 raise PayPayNetWorkError(login.text)
 
     def refresh_access_token(self):
-        """リフレッシュトークンを使用してアクセストークンを自動更新"""
+        """リフレッシュトークンを使用してアクセストークンを全自動更新してファイルへ上書き"""
         if not self.refresh_token:
-            raise PayPayLoginError("リフレッシュトークンが存在しません。再ログインが必要です。")
+            raise PayPayLoginError("リフレッシュトークンが存在しません。")
 
         payload = {
             "grant_type": "refresh_token",
@@ -88,7 +115,10 @@ class PayPay:
                 if "refresh_token" in data:
                     self.refresh_token = data.get("refresh_token")
                 self.session.cookies.set("token", self.access_token)
-                print("✅ トークンの自動更新に成功しました。")
+                
+                # 自動更新された新しいトークンを保存
+                save_tokens(self.access_token, self.refresh_token, self.client_uuid)
+                print("🔄 [全自動] PayPayトークンの自動更新と保存に成功しました。")
                 return True
             else:
                 raise PayPayLoginError(data)
@@ -117,6 +147,9 @@ class PayPay:
                 self.access_token = data.get("access_token")
                 self.refresh_token = data.get("refresh_token")
                 self.session.cookies.set("token", self.access_token)
+                
+                # 初回ログイン時のトークンをファイルに永続保存
+                save_tokens(self.access_token, self.refresh_token, self.client_uuid)
                 return data
             else:
                 raise PayPayLoginError(data)
@@ -130,11 +163,9 @@ class PayPay:
             url = url.replace("https://pay.paypay.ne.jp/", "")
 
         param = {"verificationCode": url}
-        
-        # 1回目の通信
         res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
         
-        # 期限切れエラー(401や特定コード)の場合自動リフレッシュして再試行
+        # 期限切れ(401等)を検知したらバックグラウンドで全自動更新して再試行
         if res.status_code == 401 or (res.headers.get("content-type") == "application/json" and res.json().get("header", {}).get("resultCode") == "S0001"):
             self.refresh_access_token()
             res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
@@ -171,7 +202,7 @@ class PayPay:
 
     def link_receive(self, url: str, password: str = None, link_info: dict = None) -> dict:
         if not self.access_token:
-            raise PayPayLoginError("まずはログインしてください")
+            raise PayPayLoginError("ログイン情報が存在しません")
         
         if "https://" in url:
             url = url.replace("https://pay.paypay.ne.jp/", "")
@@ -180,7 +211,6 @@ class PayPay:
             param = {"verificationCode": url}
             res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
             
-            # 期限切れエラーなら自動更新して再試行
             if res.status_code == 401 or (res.headers.get("content-type") == "application/json" and res.json().get("header", {}).get("resultCode") == "S0001"):
                 self.refresh_access_token()
                 res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
@@ -213,7 +243,6 @@ class PayPay:
         receive_res = self.session.post("https://www.paypay.ne.jp/app/v2/p2p-api/acceptP2PSendMoneyLink", json=payload, headers=headers, proxies=self.proxy)
         receive = receive_res.json()
 
-        # トークン失効エラー(S0001)が出た場合はリフレッシュして1度だけ自動リトライ
         if receive.get("header", {}).get("resultCode") == "S0001":
             self.refresh_access_token()
             receive_res = self.session.post("https://www.paypay.ne.jp/app/v2/p2p-api/acceptP2PSendMoneyLink", json=payload, headers=headers, proxies=self.proxy)
@@ -324,14 +353,13 @@ class PurchaseModal(discord.ui.Modal, title="商品購入"):
         total_price = unit_price * qty
 
         if not paypay_client:
-            await interaction.followup.send("PayPay決済処理の初期化が完了していません。管理者へご連絡ください。", ephemeral=True)
+            await interaction.followup.send("PayPay連携が初期化されていません。`/paypay_login` を1度実行してください。", ephemeral=True)
             return
 
         try:
             link_url = self.paypay_link.value
             pass_code = self.passcode.value if self.passcode.value else None
 
-            # リンク情報の検証 (期限切れ時は内部で自動リフレッシュ実行)
             link_info = paypay_client.link_check(link_url)
 
             sent_amount = link_info.money if self.payment_method == "マネー" else link_info.money_light
@@ -343,11 +371,10 @@ class PurchaseModal(discord.ui.Modal, title="商品購入"):
                 )
                 return
 
-            # 残高受け取り (期限切れ時は内部で自動リフレッシュ実行)
             paypay_client.link_receive(url=link_url, password=pass_code)
 
         except PayPayLoginError:
-            await interaction.followup.send("❌ PayPayログイン/認証エラーが発生しました。`/paypay_login` で再認証してください。", ephemeral=True)
+            await interaction.followup.send("❌ 認証情報の完全自動更新に失敗しました。`/paypay_login` で1度再ログインしてください。", ephemeral=True)
             return
         except PayPayError as e:
             await interaction.followup.send(f"❌ PayPay処理エラー: {e}", ephemeral=True)
@@ -492,14 +519,10 @@ class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
         try:
             self.temp_paypay.login(otp=self.otp.value)
             paypay_client = self.temp_paypay
-            access_token = self.temp_paypay.access_token
-            refresh_token = self.temp_paypay.refresh_token
 
             await interaction.followup.send(
-                f"✅ **PayPayログインに成功しました！**\n\n"
-                f"**【アクセストークン】**\n```\n{access_token}\n```\n"
-                f"**【リフレッシュトークン (自動更新用)】**\n```\n{refresh_token}\n```\n"
-                f"※環境変数に `PAYPAY_REFRESH_TOKEN` として `refresh_token` の値を登録すると、サーバー再起動時も完全に全自動で復帰できます。",
+                f"✅ **初回設定が完了しました！**\n"
+                f"トークンは自動保存されました。今後はBot起動時も全自動でトークン更新が行われるため、何もしなくて大丈夫です！",
                 ephemeral=True
             )
         except PayPayLoginError as e:
@@ -514,27 +537,30 @@ class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
 @bot.event
 async def on_ready():
     global paypay_client
-    paypay_token = os.getenv("PAYPAY_TOKEN")
-    paypay_refresh_token = os.getenv("PAYPAY_REFRESH_TOKEN")
-
-    if paypay_refresh_token:
-        paypay_client = PayPay(refresh_token=paypay_refresh_token)
+    
+    # 保存されたトークンファイルの読み込み
+    saved_data = load_tokens()
+    
+    if saved_data and saved_data.get("refresh_token"):
+        paypay_client = PayPay(
+            access_token=saved_data.get("access_token"),
+            refresh_token=saved_data.get("refresh_token"),
+            client_uuid=saved_data.get("client_uuid")
+        )
         try:
+            # 起動時に自動で最新トークンへリフレッシュ
             paypay_client.refresh_access_token()
-            print("PayPayクライアントの自動トークン更新が完了しました。")
+            print("🚀 保存されたトークンを使用して全自動ログイン完了")
         except Exception as e:
-            print(f"リフレッシュトークンからの復帰に失敗しました: {e}")
-    elif paypay_token:
-        paypay_client = PayPay(access_token=paypay_token)
-        print("PAYPAY_TOKEN を使用して初期化しました。")
+            print(f"⚠️ 保存トークンの自動更新に失敗（再ログインが必要な可能性があります）: {e}")
     else:
-        print("警告: PAYPAY_TOKEN または PAYPAY_REFRESH_TOKEN が設定されていません。")
+        print("⚠️ PayPayの保存データが見つかりません。初回のみ `/paypay_login` を実行してください。")
 
     await bot.tree.sync()
-    print(f"ログイン完了: {bot.user}")
+    print(f"Bot ログイン完了: {bot.user}")
 
 
-@bot.tree.command(name="paypay_login", description="PayPayにログインしてBotの受取機能を有効化します（管理者用）")
+@bot.tree.command(name="paypay_login", description="PayPayにログインします（初回のみ1度だけ実行してください）")
 @app_commands.describe(phone="PayPay登録電話番号(ハイフンなし)", password="PayPayパスワード")
 async def paypay_login_cmd(interaction: discord.Interaction, phone: str, password: str):
     try:
@@ -547,21 +573,6 @@ async def paypay_login_cmd(interaction: discord.Interaction, phone: str, passwor
         await interaction.response.send_message(f"❌ ネットワークエラーが発生しました。\n詳細: {e}", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"❌ エラーが発生しました: {e}", ephemeral=True)
-
-
-@bot.tree.command(name="paypay_set_token", description="トークンを直接設定します (手動設定用)")
-@app_commands.describe(token="PayPayのaccess_token", refresh_token="PayPayのrefresh_token (任意)")
-async def paypay_set_token_cmd(interaction: discord.Interaction, token: str, refresh_token: str = None):
-    global paypay_client
-    clean_token = token.replace("Bearer ", "").strip()
-    clean_refresh = refresh_token.strip() if refresh_token else None
-    
-    paypay_client = PayPay(access_token=clean_token, refresh_token=clean_refresh)
-    await interaction.response.send_message(
-        f"✅ **PayPayトークンを設定しました！**\n"
-        f"Access Token:\n```\n{clean_token}\n```", 
-        ephemeral=True
-    )
 
 
 @bot.tree.command(name="自販機作成", description="自販機を作成")
