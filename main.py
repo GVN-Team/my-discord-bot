@@ -1,62 +1,104 @@
+import os
 import re
+from threading import Thread
 import discord
-from discord import app_commands
 from discord.ext import commands
+from discord import app_commands
+from flask import Flask
 
-TOKEN = "YOUR_BOT_TOKEN_HERE"
-ALLOWED_INVITE_URL = "https://discord.gg/mzDCQBZWK"
+# ==========================================
+# 1. 常駐化用 Flask Webサーバー（UptimeRobot用）
+# ==========================================
+app = Flask('')
 
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run_flask():
+    # Renderなどの環境変数のPORT（無ければ8080）で起動
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+
+# ==========================================
+# 2. Discord Bot 本体ロジック
+# ==========================================
 intents = discord.Intents.default()
+intents.guilds = True
+intents.members = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-def parse_hex_color(hex_str: str) -> discord.Color:
-    hex_str = hex_str.lstrip("#")
-    if re.fullmatch(r"[0-9a-fA-F]{6}", hex_str):
-        return discord.Color(int(hex_str, 16))
-    return discord.Color(0x5865F2)
+ALLOWED_INVITE = "https://discord.gg/E5NfgyDM3M"
+HEX_COLOR_PATTERN = re.compile(r"^#([A-Fa-f0-9]{6})$")
 
-class DynamicVerifyView(discord.ui.View):
-    def __init__(self, role_id: int, label: str, style: discord.ButtonStyle):
+class VerifyView(discord.ui.View):
+    def __init__(self, role: discord.Role, button_label: str, button_color: str):
         super().__init__(timeout=None)
+        
         button = discord.ui.Button(
-            label=label,
-            style=style,
-            custom_id=f"verify_btn:{role_id}"
+            label=button_label,
+            style=discord.ButtonStyle.primary,
+            custom_id=f"verify_button_{role.id}"
         )
         button.callback = self.button_callback
+        self.role = role
         self.add_item(button)
 
     async def button_callback(self, interaction: discord.Interaction):
-        custom_id = interaction.data.get("custom_id", "")
-        role_id = int(custom_id.split(":")[1])
-        
-        role = interaction.guild.get_role(role_id)
-        if not role:
-            await interaction.response.send_message("設定されたロールが見つかりませんでした。", ephemeral=True)
+        # 招待リンクチェック
+        invites = await interaction.guild.invites()
+        is_valid_invite = any(invite.url == ALLOWED_INVITE for invite in invites)
+
+        if not is_valid_invite:
+            await interaction.response.send_message(
+                "❌ エラー: 指定された招待リンク(https://discord.gg/E5NfgyDM3M) がこのサーバーに存在しないため、認証機能を利用できません。",
+                ephemeral=True
+            )
             return
 
-        member = interaction.user
-        if role in member.roles:
-            await member.remove_roles(role)
-            await interaction.response.send_message(f"**{role.name}** ロールを解除しました。", ephemeral=True)
+        # ロール付与処理
+        if self.role in interaction.user.roles:
+            await interaction.response.send_message(
+                f"すでに {self.role.mention} を所有しています。",
+                ephemeral=True
+            )
         else:
-            await member.add_roles(role)
-            await interaction.response.send_message(f"**{role.name}** ロールを付与しました！", ephemeral=True)
+            try:
+                await interaction.user.add_roles(self.role)
+                await interaction.response.send_message(
+                    f"✅ {self.role.mention} を付与しました！",
+                    ephemeral=True
+                )
+            except discord.Forbidden:
+                await interaction.response.send_message(
+                    "❌ Botにロールを付与する権限がありません。Botの権限順位を確認してください。",
+                    ephemeral=True
+                )
 
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
     print(f"Logged in as {bot.user.name}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        print(f"Failed to sync commands: {e}")
 
 @bot.tree.command(name="verify", description="認証パネルを作成します")
 @app_commands.describe(
-    role="付与するロール（必須）",
-    title="パネルのタイトル（任意）",
-    description="説明文（任意 / {{role}} はロール名に置換されます）",
-    buttonlabel="ボタンの表示ラベル（任意）",
-    buttoncolor="ボタンの色（任意 / 例: #abc123）"
+    role="付与するロール",
+    title="タイトル（任意）",
+    description="説明文（任意）",
+    buttonlabel="ボタンのラベル（任意）",
+    buttoncolor="ボタンの色 16進数（任意 例: #abc123）"
 )
-@app_commands.checks.has_permissions(administrator=True)
 async def verify(
     interaction: discord.Interaction,
     role: discord.Role,
@@ -65,47 +107,53 @@ async def verify(
     buttonlabel: str = None,
     buttoncolor: str = None
 ):
-    guild_invites = await interaction.guild.invites()
-    allowed_code = ALLOWED_INVITE_URL.strip().lower()
-    
-    is_valid_server = False
-    for inv in guild_invites:
-        if inv.url.lower() == allowed_code or f"https://discord.gg/{inv.code.lower()}" in allowed_code:
-            is_valid_server = True
-            break
+    invites = await interaction.guild.invites()
+    is_valid_invite = any(invite.url == ALLOWED_INVITE for invite in invites)
 
-    if not is_valid_server:
+    if not is_valid_invite:
         await interaction.response.send_message(
-            "❌ **エラー:** このサーバーは指定された招待リンク（`https://discord.gg/mzDCQBZWK`）と一致しないため、このコマンドは使用できません。",
+            "❌ エラー: 指定の招待リンク (https://discord.gg/E5NfgyDM3M) がこのサーバーに作成されていないため、コマンドを実行できません。",
             ephemeral=True
         )
         return
 
-    embed_title = title if title is not None else "認証"
-    
-    if description is None:
-        embed_description = f"ボタンを押すと{role.mention}が付与されます。"
-    else:
-        embed_description = description.replace("{{role}}", role.mention)
-        
-    btn_label = buttonlabel if buttonlabel is not None else "✅┋認証する"
-    hex_color_str = buttoncolor if buttoncolor is not None else "#5865F2"
+    # デフォルト値の設定
+    final_title = title if title else "認証"
+    final_description = description if description else f"ボタンを押すと{role.mention}が付与されます。"
+    final_label = buttonlabel if buttonlabel else "✅┋認証する"
+    hex_code = buttoncolor if buttoncolor else "#5865F2"
 
-    btn_style = discord.ButtonStyle.primary
+    if not HEX_COLOR_PATTERN.match(hex_code):
+        await interaction.response.send_message(
+            "❌ エラー: カラーコードは `#abc123` のような16進数形式で指定してください。",
+            ephemeral=True
+        )
+        return
 
-    embed_color = parse_hex_color(hex_color_str)
+    embed_color = int(hex_code.lstrip("#"), 16)
+
     embed = discord.Embed(
-        title=embed_title,
-        description=embed_description,
+        title=final_title,
+        description=final_description,
         color=embed_color
     )
 
-    view = DynamicVerifyView(
-        role_id=role.id,
-        label=btn_label,
-        style=btn_style
-    )
+    view = VerifyView(role=role, button_label=final_label, button_color=hex_code)
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("認証パネルを作成しました。", ephemeral=True)
 
-    await interaction.response.send_message(embed=embed, view=view)
 
-bot.run(TOKEN)
+# ==========================================
+# 3. 起動処理（環境変数 DISCORD_TOKEN の取得）
+# ==========================================
+if __name__ == "__main__":
+    # Webサーバー起動
+    keep_alive()
+
+    # 環境変数からトークンを取得
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        raise ValueError("環境変数 DISCORD_TOKEN が設定されていません。")
+
+    # Bot起動
+    bot.run(token)
