@@ -11,8 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 from flask import Flask
 
-# ----- PayPaython クラス群 (完全認証突破版) -----
-# 公式アプリのクレデンシャル(Basic認証)を追加し、バージョンを最新に偽装
+# ----- PayPaython クラス群 (400 Bad Request 対策版) -----
 headers = {
     "Accept": "application/json, text/plain, */*",
     "User-Agent": "PayPay/4.80.0 (iPhone; iOS 16.5; Scale/3.00)",
@@ -73,11 +72,11 @@ class PayPay:
         clean_otp = "".join(filter(str.isdigit, str(otp)))
 
         payload = {
-            "otp": clean_otp,
-            "otp_reference_id": self.otp_reference_id,
-            "device_uuid": self.client_uuid,
+            "scope": "SIGN_IN",
             "client_uuid": self.client_uuid,
-            "grant_type": "otp"
+            "grant_type": "otp",
+            "otp": clean_otp,
+            "otp_reference_id": self.otp_reference_id
         }
         
         if self.otp_prefix:
@@ -487,6 +486,16 @@ async def paypay_login_cmd(interaction: discord.Interaction, phone: str, passwor
         await interaction.response.send_message(f"❌ ネットワークエラーが発生しました。\n詳細: {e}", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"❌ エラーが発生しました: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="paypay_set_token", description="【確実に動作】取得済みのPayPay Access Tokenを直接設定します")
+@app_commands.describe(token="PayPayのaccess_token (bearer含む/不問)")
+async def paypay_set_token_cmd(interaction: discord.Interaction, token: str):
+    global paypay_client
+    clean_token = token.replace("Bearer ", "").strip()
+    paypay_client = PayPay(access_token=clean_token)
+    await interaction.response.send_message("✅ **PayPayアクセストークンをセットしました！**\nこれで受取機能が使用可能になります。", ephemeral=True)
+
 
 @bot.tree.command(name="自販機作成", description="自販機を作成")
 @app_commands.describe(name="自販機の名前")
