@@ -15,15 +15,14 @@ def save_tokens(access_token: str, refresh_token: str, client_uuid: str):
     }
     with open(TOKEN_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
-    print("💾 トークン情報をローカルファイルに保存しました。")
 
 def load_tokens():
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception as e:
-            print(f"トークンファイルの読み込み失敗: {e}")
+        except Exception:
+            pass
     return None
 
 headers = {
@@ -99,12 +98,10 @@ class PayPay:
                     self.refresh_token = data.get("refresh_token")
                 self.session.cookies.set("token", self.access_token)
                 save_tokens(self.access_token, self.refresh_token, self.client_uuid)
-                print("🔄 [全自動] PayPayトークンの自動更新と保存に成功しました。")
                 return True
             else:
                 raise PayPayLoginError(data)
         except Exception as e:
-            print(f"❌ トークン自動更新失敗: {e}")
             raise PayPayLoginError("トークンの自動更新に失敗しました。")
 
     def login(self, otp: str):
