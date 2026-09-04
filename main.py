@@ -1,258 +1,14 @@
 import os
-import json
 import uuid
-import datetime
-from typing import NamedTuple
-from uuid import uuid4
 from threading import Thread
 
-import requests
 import discord
 from discord import app_commands
 from discord.ext import commands
 from flask import Flask
 
-TOKEN_FILE = "paypay_tokens.json"
-
-# ----- トークン永続化（保存・読み込み）処理 -----
-def save_tokens(access_token: str, refresh_token: str, client_uuid: str):
-    """取得したトークンをローカルのJSONファイルに自動保存"""
-    data = {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "client_uuid": client_uuid
-    }
-    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
-    print("💾 トークン情報をローカルファイルに保存しました。")
-
-def load_tokens():
-    """保存されたトークン情報を読み込む"""
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"トークンファイルの読み込み失敗: {e}")
-    return None
-
-
-# ----- PayPaython クラス群 -----
-headers = {
-    "Accept": "application/json, text/plain, */*",
-    "User-Agent": "PayPay/4.80.0 (iPhone; iOS 16.5; Scale/3.00)",
-    "Content-Type": "application/json",
-    "X-Device-Uuid": str(uuid4()),
-    "X-Client-Type": "IOS",
-    "X-Client-Version": "4.80.0",
-    "Authorization": "Basic YXBwLWlvcy1wYXlwYXk6Y3lOeldsY0pHT0xOQnEzeXFWeUEyYklzOThjRzVxdmw="
-}
-
-class PayPayError(Exception):
-    pass
-class PayPayNetWorkError(Exception):
-    pass
-class PayPayLoginError(Exception):
-    pass
-
-class PayPay:
-    def __init__(self, phone: str = None, password: str = None, client_uuid: str = None, access_token: str = None, refresh_token: str = None, proxy: dict = None):
-        self.session = requests.Session()
-        self.proxy = proxy
-        self.client_uuid = client_uuid if client_uuid else str(uuid4()).upper()
-        self.phone = phone
-        self.password = password
-        self.otp_prefix = None
-        self.otp_reference_id = None
-        self.access_token = access_token
-        self.refresh_token = refresh_token
-        
-        if access_token:
-            self.session.cookies.set("token", access_token)
-        elif phone:
-            payload = {
-                "scope": "SIGN_IN",
-                "client_uuid": self.client_uuid,
-                "grant_type": "password",
-                "username": self.phone,
-                "password": self.password,
-                "add_otp_prefix": True,
-                "language": "ja"
-            }
-            login = self.session.post("https://www.paypay.ne.jp/app/v1/oauth/token", json=payload, headers=headers, proxies=proxy)
-            try:
-                data = login.json()
-                if "access_token" in data:
-                    self.access_token = data.get("access_token")
-                    self.refresh_token = data.get("refresh_token")
-                    self.session.cookies.set("token", self.access_token)
-                    save_tokens(self.access_token, self.refresh_token, self.client_uuid)
-                elif "otp_prefix" in data or "otp_reference_id" in data:
-                    self.otp_prefix = data.get("otp_prefix")
-                    self.otp_reference_id = data.get("otp_reference_id")
-                else:
-                    raise PayPayLoginError(data)
-            except Exception as e:
-                if isinstance(e, PayPayLoginError):
-                    raise e
-                raise PayPayNetWorkError(login.text)
-
-    def refresh_access_token(self):
-        """リフレッシュトークンを使用してアクセストークンを全自動更新してファイルへ上書き"""
-        if not self.refresh_token:
-            raise PayPayLoginError("リフレッシュトークンが存在しません。")
-
-        payload = {
-            "grant_type": "refresh_token",
-            "refresh_token": self.refresh_token,
-            "client_uuid": self.client_uuid
-        }
-        res = self.session.post("https://www.paypay.ne.jp/app/v1/oauth/token", json=payload, headers=headers, proxies=self.proxy)
-        try:
-            data = res.json()
-            if "access_token" in data:
-                self.access_token = data.get("access_token")
-                if "refresh_token" in data:
-                    self.refresh_token = data.get("refresh_token")
-                self.session.cookies.set("token", self.access_token)
-                
-                # 自動更新された新しいトークンを保存
-                save_tokens(self.access_token, self.refresh_token, self.client_uuid)
-                print("🔄 [全自動] PayPayトークンの自動更新と保存に成功しました。")
-                return True
-            else:
-                raise PayPayLoginError(data)
-        except Exception as e:
-            print(f"❌ トークン自動更新失敗: {e}")
-            raise PayPayLoginError("トークンの自動更新に失敗しました。")
-
-    def login(self, otp: str):
-        clean_otp = "".join(filter(str.isdigit, str(otp)))
-
-        payload = {
-            "scope": "SIGN_IN",
-            "client_uuid": self.client_uuid,
-            "grant_type": "otp",
-            "otp": clean_otp,
-            "otp_reference_id": self.otp_reference_id
-        }
-        
-        if self.otp_prefix:
-            payload["otp_prefix"] = self.otp_prefix
-
-        res = self.session.post("https://www.paypay.ne.jp/app/v1/oauth/token", json=payload, headers=headers, proxies=self.proxy)
-        try:
-            data = res.json()
-            if "access_token" in data:
-                self.access_token = data.get("access_token")
-                self.refresh_token = data.get("refresh_token")
-                self.session.cookies.set("token", self.access_token)
-                
-                # 初回ログイン時のトークンをファイルに永続保存
-                save_tokens(self.access_token, self.refresh_token, self.client_uuid)
-                return data
-            else:
-                raise PayPayLoginError(data)
-        except Exception as e:
-            if isinstance(e, PayPayLoginError):
-                raise e
-            raise PayPayNetWorkError(res.text)
-
-    def link_check(self, url: str):
-        if "https://" in url:
-            url = url.replace("https://pay.paypay.ne.jp/", "")
-
-        param = {"verificationCode": url}
-        res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
-        
-        # 期限切れ(401等)を検知したらバックグラウンドで全自動更新して再試行
-        if res.status_code == 401 or (res.headers.get("content-type") == "application/json" and res.json().get("header", {}).get("resultCode") == "S0001"):
-            self.refresh_access_token()
-            res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
-
-        link_info = res.json()
-        if link_info.get("header", {}).get("resultCode") != "S0000":
-            raise PayPayError(link_info)
-        
-        class LinkInfo(NamedTuple):
-            sender_name: str
-            sender_external_id: str
-            sender_icon: str
-            order_id: str
-            chat_room_id: str
-            amount: int
-            status: str
-            money_light: int
-            money: int
-            has_password: bool
-            raw: dict
-
-        sender_name = link_info["payload"]["sender"]["displayName"]
-        sender_external_id = link_info["payload"]["sender"]["externalId"]
-        sender_icon = link_info["payload"]["sender"]["photoUrl"]
-        order_id = link_info["payload"]["pendingP2PInfo"]["orderId"]
-        chat_room_id = link_info["payload"]["message"]["chatRoomId"]
-        amount = link_info["payload"]["pendingP2PInfo"]["amount"]
-        status = link_info["payload"]["message"]["data"]["status"]
-        money_light = link_info["payload"]["message"]["data"]["subWalletSplit"]["senderPrepaidAmount"]
-        money = link_info["payload"]["message"]["data"]["subWalletSplit"]["senderEmoneyAmount"]
-        has_password = link_info["payload"]["pendingP2PInfo"]["isSetPasscode"]
-
-        return LinkInfo(sender_name, sender_external_id, sender_icon, order_id, chat_room_id, amount, status, money_light, money, has_password, link_info)
-
-    def link_receive(self, url: str, password: str = None, link_info: dict = None) -> dict:
-        if not self.access_token:
-            raise PayPayLoginError("ログイン情報が存在しません")
-        
-        if "https://" in url:
-            url = url.replace("https://pay.paypay.ne.jp/", "")
-        
-        if not link_info:
-            param = {"verificationCode": url}
-            res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
-            
-            if res.status_code == 401 or (res.headers.get("content-type") == "application/json" and res.json().get("header", {}).get("resultCode") == "S0001"):
-                self.refresh_access_token()
-                res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
-            
-            link_info = res.json()
-            if link_info.get("header", {}).get("resultCode") != "S0000":
-                raise PayPayError(link_info)
-        
-        if link_info["payload"]["orderStatus"] != "PENDING":
-            raise PayPayError("すでに 受け取り / 辞退 / キャンセル されているリンクです")
-        
-        if link_info["payload"]["pendingP2PInfo"]["isSetPasscode"] and password == None:
-            raise PayPayError("このリンクにはパスワードが設定されています")
-        
-        payload = {
-            "verificationCode": url,
-            "client_uuid": self.client_uuid,
-            "requestAt": str(datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime('%Y-%m-%dT%H:%M:%S+0900')),
-            "requestId": link_info["payload"]["message"]["data"]["requestId"],
-            "orderId": link_info["payload"]["message"]["data"]["orderId"],
-            "senderMessageId": link_info["payload"]["message"]["messageId"],
-            "senderChannelUrl": link_info["payload"]["message"]["chatRoomId"],
-            "iosMinimumVersion": "3.45.0",
-            "androidMinimumVersion": "3.45.0"
-        }
-        
-        if password:
-            payload["passcode"] = password
-
-        receive_res = self.session.post("https://www.paypay.ne.jp/app/v2/p2p-api/acceptP2PSendMoneyLink", json=payload, headers=headers, proxies=self.proxy)
-        receive = receive_res.json()
-
-        if receive.get("header", {}).get("resultCode") == "S0001":
-            self.refresh_access_token()
-            receive_res = self.session.post("https://www.paypay.ne.jp/app/v2/p2p-api/acceptP2PSendMoneyLink", json=payload, headers=headers, proxies=self.proxy)
-            receive = receive_res.json()
-
-        if receive.get("header", {}).get("resultCode") != "S0000":
-            raise PayPayError(receive)
-        
-        return receive
-
+# PayPayモジュールの呼び出し
+from paypay import PayPay, PayPayError, PayPayLoginError, PayPayNetWorkError, load_tokens
 
 # ----------------------------------------------------
 # 1. スリープ防止用 Flask サーバー
@@ -538,9 +294,7 @@ class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
 async def on_ready():
     global paypay_client
     
-    # 保存されたトークンファイルの読み込み
     saved_data = load_tokens()
-    
     if saved_data and saved_data.get("refresh_token"):
         paypay_client = PayPay(
             access_token=saved_data.get("access_token"),
@@ -548,11 +302,10 @@ async def on_ready():
             client_uuid=saved_data.get("client_uuid")
         )
         try:
-            # 起動時に自動で最新トークンへリフレッシュ
             paypay_client.refresh_access_token()
             print("🚀 保存されたトークンを使用して全自動ログイン完了")
         except Exception as e:
-            print(f"⚠️ 保存トークンの自動更新に失敗（再ログインが必要な可能性があります）: {e}")
+            print(f"⚠️ 自動更新失敗: {e}")
     else:
         print("⚠️ PayPayの保存データが見つかりません。初回のみ `/paypay_login` を実行してください。")
 
