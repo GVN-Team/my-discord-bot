@@ -381,7 +381,10 @@ async def verify_cmd(
     buttoncolor: str = None
 ):
     final_title = title if title else "認証"
-    final_desc = description if description else f"ボタンを押すと{role.mention}が付与されます。"
+    
+    role_text = role.name if role.is_default() else f"<@&{role.id}>"
+    final_desc = description if description else f"ボタンを押すと{role_text}が付与されます。"
+    
     final_label = buttonlabel if buttonlabel else "✅┋認証する"
     color_hex = buttoncolor if buttoncolor else "#5865F2"
 
