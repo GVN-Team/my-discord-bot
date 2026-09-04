@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 from flask import Flask
 
-# ----- PayPaython クラス群 (400 Bad Request 対策版) -----
+# ----- PayPaython クラス群 -----
 headers = {
     "Accept": "application/json, text/plain, */*",
     "User-Agent": "PayPay/4.80.0 (iPhone; iOS 16.5; Scale/3.00)",
@@ -30,7 +30,7 @@ class PayPayLoginError(Exception):
     pass
 
 class PayPay:
-    def __init__(self, phone: str = None, password: str = None, client_uuid: str = str(uuid4()).upper(), access_token: str = None, proxy: dict = None):
+    def __init__(self, phone: str = None, password: str = None, client_uuid: str = str(uuid4()).upper(), access_token: str = None, refresh_token: str = None, proxy: dict = None):
         self.session = requests.Session()
         self.proxy = proxy
         self.client_uuid = client_uuid
@@ -38,12 +38,12 @@ class PayPay:
         self.password = password
         self.otp_prefix = None
         self.otp_reference_id = None
+        self.access_token = access_token
+        self.refresh_token = refresh_token
         
         if access_token:
-            self.access_token = access_token
             self.session.cookies.set("token", access_token)
         elif phone:
-            self.access_token = None
             payload = {
                 "scope": "SIGN_IN",
                 "client_uuid": self.client_uuid,
@@ -57,7 +57,9 @@ class PayPay:
             try:
                 data = login.json()
                 if "access_token" in data:
-                    self.access_token = data["access_token"]
+                    self.access_token = data.get("access_token")
+                    self.refresh_token = data.get("refresh_token")
+                    self.session.cookies.set("token", self.access_token)
                 elif "otp_prefix" in data or "otp_reference_id" in data:
                     self.otp_prefix = data.get("otp_prefix")
                     self.otp_reference_id = data.get("otp_reference_id")
@@ -67,6 +69,32 @@ class PayPay:
                 if isinstance(e, PayPayLoginError):
                     raise e
                 raise PayPayNetWorkError(login.text)
+
+    def refresh_access_token(self):
+        """リフレッシュトークンを使用してアクセストークンを自動更新"""
+        if not self.refresh_token:
+            raise PayPayLoginError("リフレッシュトークンが存在しません。再ログインが必要です。")
+
+        payload = {
+            "grant_type": "refresh_token",
+            "refresh_token": self.refresh_token,
+            "client_uuid": self.client_uuid
+        }
+        res = self.session.post("https://www.paypay.ne.jp/app/v1/oauth/token", json=payload, headers=headers, proxies=self.proxy)
+        try:
+            data = res.json()
+            if "access_token" in data:
+                self.access_token = data.get("access_token")
+                if "refresh_token" in data:
+                    self.refresh_token = data.get("refresh_token")
+                self.session.cookies.set("token", self.access_token)
+                print("✅ トークンの自動更新に成功しました。")
+                return True
+            else:
+                raise PayPayLoginError(data)
+        except Exception as e:
+            print(f"❌ トークン自動更新失敗: {e}")
+            raise PayPayLoginError("トークンの自動更新に失敗しました。")
 
     def login(self, otp: str):
         clean_otp = "".join(filter(str.isdigit, str(otp)))
@@ -86,7 +114,8 @@ class PayPay:
         try:
             data = res.json()
             if "access_token" in data:
-                self.access_token = data["access_token"]
+                self.access_token = data.get("access_token")
+                self.refresh_token = data.get("refresh_token")
                 self.session.cookies.set("token", self.access_token)
                 return data
             else:
@@ -101,9 +130,17 @@ class PayPay:
             url = url.replace("https://pay.paypay.ne.jp/", "")
 
         param = {"verificationCode": url}
-        link_info = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy).json()
         
-        if link_info["header"]["resultCode"] != "S0000":
+        # 1回目の通信
+        res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
+        
+        # 期限切れエラー(401や特定コード)の場合自動リフレッシュして再試行
+        if res.status_code == 401 or (res.headers.get("content-type") == "application/json" and res.json().get("header", {}).get("resultCode") == "S0001"):
+            self.refresh_access_token()
+            res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
+
+        link_info = res.json()
+        if link_info.get("header", {}).get("resultCode") != "S0000":
             raise PayPayError(link_info)
         
         class LinkInfo(NamedTuple):
@@ -141,8 +178,15 @@ class PayPay:
         
         if not link_info:
             param = {"verificationCode": url}
-            link_info = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy).json()
-            if link_info["header"]["resultCode"] != "S0000":
+            res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
+            
+            # 期限切れエラーなら自動更新して再試行
+            if res.status_code == 401 or (res.headers.get("content-type") == "application/json" and res.json().get("header", {}).get("resultCode") == "S0001"):
+                self.refresh_access_token()
+                res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
+            
+            link_info = res.json()
+            if link_info.get("header", {}).get("resultCode") != "S0000":
                 raise PayPayError(link_info)
         
         if link_info["payload"]["orderStatus"] != "PENDING":
@@ -166,11 +210,16 @@ class PayPay:
         if password:
             payload["passcode"] = password
 
-        receive = self.session.post("https://www.paypay.ne.jp/app/v2/p2p-api/acceptP2PSendMoneyLink", json=payload, headers=headers, proxies=self.proxy).json()
-        if receive["header"]["resultCode"] == "S0001":
-            raise PayPayLoginError(receive)
-        
-        if receive["header"]["resultCode"] != "S0000":
+        receive_res = self.session.post("https://www.paypay.ne.jp/app/v2/p2p-api/acceptP2PSendMoneyLink", json=payload, headers=headers, proxies=self.proxy)
+        receive = receive_res.json()
+
+        # トークン失効エラー(S0001)が出た場合はリフレッシュして1度だけ自動リトライ
+        if receive.get("header", {}).get("resultCode") == "S0001":
+            self.refresh_access_token()
+            receive_res = self.session.post("https://www.paypay.ne.jp/app/v2/p2p-api/acceptP2PSendMoneyLink", json=payload, headers=headers, proxies=self.proxy)
+            receive = receive_res.json()
+
+        if receive.get("header", {}).get("resultCode") != "S0000":
             raise PayPayError(receive)
         
         return receive
@@ -193,7 +242,7 @@ def keep_alive():
 
 
 # ----------------------------------------------------
-# 2. ボット初期化 & データベース (メモリ保持)
+# 2. ボット初期化 & データベース
 # ----------------------------------------------------
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -282,6 +331,7 @@ class PurchaseModal(discord.ui.Modal, title="商品購入"):
             link_url = self.paypay_link.value
             pass_code = self.passcode.value if self.passcode.value else None
 
+            # リンク情報の検証 (期限切れ時は内部で自動リフレッシュ実行)
             link_info = paypay_client.link_check(link_url)
 
             sent_amount = link_info.money if self.payment_method == "マネー" else link_info.money_light
@@ -293,16 +343,17 @@ class PurchaseModal(discord.ui.Modal, title="商品購入"):
                 )
                 return
 
+            # 残高受け取り (期限切れ時は内部で自動リフレッシュ実行)
             paypay_client.link_receive(url=link_url, password=pass_code)
 
         except PayPayLoginError:
-            await interaction.followup.send("PayPayログインエラーが発生しました。トークンを確認してください。", ephemeral=True)
+            await interaction.followup.send("❌ PayPayログイン/認証エラーが発生しました。`/paypay_login` で再認証してください。", ephemeral=True)
             return
         except PayPayError as e:
-            await interaction.followup.send(f"PayPay処理エラー: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ PayPay処理エラー: {e}", ephemeral=True)
             return
         except Exception as e:
-            await interaction.followup.send(f"決済失敗: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ 決済失敗: {e}", ephemeral=True)
             return
 
         delivery_msg = []
@@ -441,13 +492,14 @@ class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
         try:
             self.temp_paypay.login(otp=self.otp.value)
             paypay_client = self.temp_paypay
-            token = self.temp_paypay.access_token
+            access_token = self.temp_paypay.access_token
+            refresh_token = self.temp_paypay.refresh_token
 
             await interaction.followup.send(
-                f"✅ **PayPayログインに成功しました！**\n"
-                f"BotのPayPay連携が有効化されました。\n\n"
-                f"※再起動後も保持する場合は、環境変数 `PAYPAY_TOKEN` に以下を設定してください:\n"
-                f"```\n{token}\n```",
+                f"✅ **PayPayログインに成功しました！**\n\n"
+                f"**【アクセストークン】**\n```\n{access_token}\n```\n"
+                f"**【リフレッシュトークン (自動更新用)】**\n```\n{refresh_token}\n```\n"
+                f"※環境変数に `PAYPAY_REFRESH_TOKEN` として `refresh_token` の値を登録すると、サーバー再起動時も完全に全自動で復帰できます。",
                 ephemeral=True
             )
         except PayPayLoginError as e:
@@ -463,11 +515,20 @@ class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
 async def on_ready():
     global paypay_client
     paypay_token = os.getenv("PAYPAY_TOKEN")
-    if paypay_token:
+    paypay_refresh_token = os.getenv("PAYPAY_REFRESH_TOKEN")
+
+    if paypay_refresh_token:
+        paypay_client = PayPay(refresh_token=paypay_refresh_token)
+        try:
+            paypay_client.refresh_access_token()
+            print("PayPayクライアントの自動トークン更新が完了しました。")
+        except Exception as e:
+            print(f"リフレッシュトークンからの復帰に失敗しました: {e}")
+    elif paypay_token:
         paypay_client = PayPay(access_token=paypay_token)
-        print("PayPayクライアントの初期化が完了しました。")
+        print("PAYPAY_TOKEN を使用して初期化しました。")
     else:
-        print("警告: PAYPAY_TOKEN が設定されていません。")
+        print("警告: PAYPAY_TOKEN または PAYPAY_REFRESH_TOKEN が設定されていません。")
 
     await bot.tree.sync()
     print(f"ログイン完了: {bot.user}")
@@ -488,13 +549,19 @@ async def paypay_login_cmd(interaction: discord.Interaction, phone: str, passwor
         await interaction.response.send_message(f"❌ エラーが発生しました: {e}", ephemeral=True)
 
 
-@bot.tree.command(name="paypay_set_token", description="【確実に動作】取得済みのPayPay Access Tokenを直接設定します")
-@app_commands.describe(token="PayPayのaccess_token (bearer含む/不問)")
-async def paypay_set_token_cmd(interaction: discord.Interaction, token: str):
+@bot.tree.command(name="paypay_set_token", description="トークンを直接設定します (手動設定用)")
+@app_commands.describe(token="PayPayのaccess_token", refresh_token="PayPayのrefresh_token (任意)")
+async def paypay_set_token_cmd(interaction: discord.Interaction, token: str, refresh_token: str = None):
     global paypay_client
     clean_token = token.replace("Bearer ", "").strip()
-    paypay_client = PayPay(access_token=clean_token)
-    await interaction.response.send_message("✅ **PayPayアクセストークンをセットしました！**\nこれで受取機能が使用可能になります。", ephemeral=True)
+    clean_refresh = refresh_token.strip() if refresh_token else None
+    
+    paypay_client = PayPay(access_token=clean_token, refresh_token=clean_refresh)
+    await interaction.response.send_message(
+        f"✅ **PayPayトークンを設定しました！**\n"
+        f"Access Token:\n```\n{clean_token}\n```", 
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="自販機作成", description="自販機を作成")
