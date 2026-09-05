@@ -138,20 +138,22 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
         await interaction.followup.send("商品が見つかりませんでした。", ephemeral=True)
         return False
 
-    delivery_parts = [
-        "✅ **購入が完了しました！**\n",
-        f"ご購入ありがとうございます！\n商品: {item['name']} × {qty}"
-    ]
+    header = "✅ **購入が完了しました！**\n\n"
+    info = f"ご購入ありがとうございます！\n商品: {item['name']} × {qty}"
 
+    delivery_blocks = []
     if item["type"] == "有限":
         drawn = item["stock_list"][:qty]
         item["stock_list"] = item["stock_list"][qty:]
+        
         for d in drawn:
+            block = ""
             if d.get("msg"):
-                delivery_parts.append(d["msg"])
-            delivery_parts.append(f"```\n{d['content']}\n```")
+                block += f"{d['msg']}\n"
+            block += f"```\n{d['content']}\n```"
+            delivery_blocks.append(block)
 
-    dm_text = "\n".join(delivery_parts)
+    dm_text = f"{header}{info}\n" + "\n".join(delivery_blocks)
 
     try:
         await interaction.user.send(dm_text)
