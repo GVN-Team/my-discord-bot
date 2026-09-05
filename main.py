@@ -427,9 +427,11 @@ class VendingView(discord.ui.View):
 
     @discord.ui.button(label="🛒購入する", style=discord.ButtonStyle.success, custom_id="vending_buy_btn")
     async def buy_cb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
         vm_data = vending_machines.get(self.vending_machine_id)
         if not vm_data or not vm_data["items"]:
-            await interaction.response.send_message("商品が登録されていません。", ephemeral=True)
+            await interaction.followup.send("商品が登録されていません。", ephemeral=True)
             return
 
         options = [
@@ -448,22 +450,24 @@ class VendingView(discord.ui.View):
         select.callback = select_cb
         item_view = discord.ui.View(timeout=None)
         item_view.add_item(select)
-        await interaction.response.send_message("商品を選択してください", view=item_view, ephemeral=True)
+        await interaction.followup.send("商品を選択してください", view=item_view, ephemeral=True)
 
     @discord.ui.button(label="在庫確認", style=discord.ButtonStyle.danger, custom_id="vending_stock_btn")
     async def stock_cb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
         vm_data = vending_machines.get(self.vending_machine_id)
         if not vm_data or not vm_data["items"]:
-            await interaction.response.send_message("商品が登録されていません。", ephemeral=True)
+            await interaction.followup.send("商品が登録されていません。", ephemeral=True)
             return
 
         stock_info = []
-        for i_id, i_data in vm_data["items"].values():
+        for i_id, i_data in vm_data["items"].items():
             stock_num = "無限" if i_data["type"] == "無限" else str(len(i_data.get("stock_list", [])))
             stock_info.append(f"**{i_data['name']}**\n在庫:{stock_num}")
 
         msg = "\n\n".join(stock_info)
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
 class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
     otp = discord.ui.TextInput(
