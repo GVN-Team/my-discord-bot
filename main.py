@@ -727,6 +727,7 @@ async def help_all_cmd(interaction: discord.Interaction):
     embed.add_field(name="🛒 自販機管理", value="`/自販機作成`, `/自販機設置` など", inline=True)
     embed.add_field(name="📦 在庫管理", value="`/在庫追加`, `/在庫内容確認` など", inline=True)
     embed.add_field(name="🏷️ クーポン管理", value="`/クーポン作成`, `/クーポン一覧` など", inline=True)
+    embed.add_field(name="🧹 メッセージ削除", value="`/clear` : チャンネルメッセージ削除", inline=True)
 
     await interaction.response.send_message(embed=embed, view=MainHelpView(), ephemeral=True)
 
@@ -1126,6 +1127,23 @@ async def delete_coupon(interaction: discord.Interaction, code: str):
     view.add_item(cancel_btn)
 
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="clear", description="実行したチャンネルのメッセージをすべて削除します")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def clear_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        deleted = await interaction.channel.purge(limit=100)
+        await interaction.followup.send(f"✅ {len(deleted)} 件のメッセージを削除しました。", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ Botに「メッセージの管理」権限が不足しています。", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ メッセージの削除中にエラーが発生しました: {e}", ephemeral=True)
+
+@clear_cmd.error
+async def clear_cmd_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ このコマンドを実行する権限（メッセージの管理）がありません。", ephemeral=True)
 
 if __name__ == "__main__":
     keep_alive()
