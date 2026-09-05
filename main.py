@@ -265,7 +265,8 @@ class MemberHelpSelect(discord.ui.Select):
                 color=discord.Color.red()
             ),
         }
-        await interaction.response.send_message(embed=embeds[val], ephemeral=True)
+        # 公開埋め込みとしてメッセージを送信（ephemeral=Trueを排除）
+        await interaction.response.send_message(embed=embeds[val])
 
 class MemberHelpView(discord.ui.View):
     def __init__(self):
@@ -744,7 +745,8 @@ async def help_member_cmd(interaction: discord.Interaction):
     embed.add_field(name="📩 商品受取", value="購入完了時のDM受取と設定確認", inline=False)
     embed.add_field(name="❓ FAQ", value="トラブル時の対処法", inline=False)
 
-    await interaction.response.send_message(embed=embed, view=MemberHelpView(), ephemeral=True)
+    # 自販機のようにチャンネル内へ常駐埋め込みとして送信（ephemeral=Trueを削除）
+    await interaction.response.send_message(embed=embed, view=MemberHelpView())
 
 bot.tree.add_command(help_group)
 
