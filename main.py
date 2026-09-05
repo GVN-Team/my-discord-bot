@@ -132,41 +132,20 @@ async def coupon_autocomplete(interaction: discord.Interaction, current: str):
         if current.lower() in code.lower()
     ][:25]
 
-class PurchaseModal(discord.ui.Modal, title="商品購入"):
-    def __init__(self, v_id: str, item_id: str, payment_method: str):
-        super().__init__()
+class ConfirmPurchaseView(discord.ui.View):
+    def __init__(self, v_id: str, item_id: str, payment_method: str, qty: int, paypay_link: str, passcode: str, final_price: int):
+        super().__init__(timeout=None)
         self.v_id = v_id
         self.item_id = item_id
         self.payment_method = payment_method
+        self.qty = qty
+        self.paypay_link = paypay_link
+        self.passcode = passcode
+        self.final_price = final_price
 
-        self.quantity = discord.ui.TextInput(
-            label="購入個数*", placeholder="1", default="1", required=True
-        )
-        self.paypay_link = discord.ui.TextInput(
-            label="PayPay送金リンク*",
-            placeholder="https://pay.paypay.ne.jp/...",
-            required=True,
-        )
-        self.passcode = discord.ui.TextInput(
-            label="パスコード (設定されている場合)",
-            placeholder="4桁の数字",
-            required=False,
-            max_length=4
-        )
-        self.add_item(self.quantity)
-        self.add_item(self.paypay_link)
-        self.add_item(self.passcode)
-
-    async def on_submit(self, interaction: discord.Interaction):
+    @discord.ui.button(label="購入する", style=discord.ButtonStyle.success)
+    async def confirm_cb(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-
-        try:
-            qty = int(self.quantity.value)
-            if qty <= 0:
-                raise ValueError
-        except ValueError:
-            await interaction.followup.send("購入個数は1以上の整数で入力してください。", ephemeral=True)
-            return
 
         item = vending_machines.get(self.v_id, {}).get("items", {}).get(self.item_id)
         if not item:
@@ -175,33 +154,24 @@ class PurchaseModal(discord.ui.Modal, title="商品購入"):
 
         if item["type"] == "有限":
             stock_list = item.get("stock_list", [])
-            if len(stock_list) < qty:
+            if len(stock_list) < self.qty:
                 await interaction.followup.send(f"在庫が足りません。(現在在庫: {len(stock_list)}個)", ephemeral=True)
                 return
-
-        unit_price = item["money"] if self.payment_method == "マネー" else item["manera"]
-        total_price = unit_price * qty
 
         if not paypay_client:
             await interaction.followup.send("PayPay連携が初期化されていません。`/paypay_login` を1度実行してください。", ephemeral=True)
             return
 
         try:
-            link_url = self.paypay_link.value
-            pass_code = self.passcode.value if self.passcode.value else None
-
-            link_info = paypay_client.link_check(link_url)
-
+            link_info = paypay_client.link_check(self.paypay_link)
             sent_amount = link_info.money if self.payment_method == "マネー" else link_info.money_light
-            if sent_amount < total_price:
-                await interaction.followup.send(
-                    f"金額（またはマネー種別）が不足しています。\n"
-                    f"必要額: {total_price}円 ({self.payment_method}) / 送金額: {sent_amount}円",
-                    ephemeral=True
-                )
+
+            if sent_amount < self.final_price:
+                diff = self.final_price - sent_amount
+                await interaction.followup.send(f"{diff}円足りません。もう一度SMSリンクを作成して送信してください。", ephemeral=True)
                 return
 
-            paypay_client.link_receive(url=link_url, password=pass_code)
+            paypay_client.link_receive(url=self.paypay_link, password=self.passcode)
 
         except PayPayLoginError:
             await interaction.followup.send("❌ 認証情報の完全自動更新に失敗しました。`/paypay_login` で1度再ログインしてください。", ephemeral=True)
@@ -215,16 +185,92 @@ class PurchaseModal(discord.ui.Modal, title="商品購入"):
 
         delivery_msg = []
         if item["type"] == "有限":
-            drawn = item["stock_list"][:qty]
-            item["stock_list"] = item["stock_list"][qty:]
+            drawn = item["stock_list"][:self.qty]
+            item["stock_list"] = item["stock_list"][self.qty:]
             for d in drawn:
                 msg_part = f"\n{d['msg']}" if d.get("msg") else ""
                 delivery_msg.append(f"```\n{d['content']}\n```" + msg_part)
         else:
-            delivery_msg.append(f"ご購入ありがとうございます！\n商品: {item['name']} x {qty}")
+            delivery_msg.append(f"ご購入ありがとうございます！\n商品: {item['name']} x {self.qty}")
 
         result_text = f"✅ **決済が完了し、残高に直接チャージされました！**\n\n" + "\n".join(delivery_msg)
         await interaction.followup.send(result_text, ephemeral=True)
+
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.danger)
+    async def cancel_cb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="購入をキャンセルしました。", view=None)
+
+class PurchaseModal(discord.ui.Modal, title="商品購入"):
+    def __init__(self, v_id: str, item_id: str, payment_method: str):
+        super().__init__()
+        self.v_id = v_id
+        self.item_id = item_id
+        self.payment_method = payment_method
+
+        self.quantity = discord.ui.TextInput(
+            label="購入個数*", placeholder="1", default="1", required=True
+        )
+        self.paypay_link = discord.ui.TextInput(
+            label="paypayリンク<必須*>",
+            placeholder="https://pay.paypay.ne.jp/...",
+            required=True,
+        )
+        self.passcode = discord.ui.TextInput(
+            label="パスコード (設定されている場合)",
+            placeholder="4桁の数字",
+            required=False,
+            max_length=4
+        )
+        self.coupon_code = discord.ui.TextInput(
+            label="クーポンコード",
+            placeholder="コードをお持ちの場合は入力",
+            required=False
+        )
+        self.add_item(self.quantity)
+        self.add_item(self.paypay_link)
+        self.add_item(self.passcode)
+        self.add_item(self.coupon_code)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            qty = int(self.quantity.value)
+            if qty <= 0:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("購入個数は1以上の整数で入力してください。", ephemeral=True)
+            return
+
+        item = vending_machines.get(self.v_id, {}).get("items", {}).get(self.item_id)
+        if not item:
+            await interaction.response.send_message("商品が見つかりませんでした。", ephemeral=True)
+            return
+
+        unit_price = item["money"] if self.payment_method == "マネー" else item["manera"]
+        base_total = unit_price * qty
+        discount = 0
+
+        c_code = self.coupon_code.value.strip() if self.coupon_code.value else None
+        if c_code and c_code in coupons:
+            c_info = coupons[c_code]
+            if c_info["vm_id"] == self.v_id:
+                discount = c_info["amount"]
+
+        final_price = max(0, base_total - discount)
+        calc_str = f"`{unit_price}×{qty}-{discount}={final_price}`"
+
+        pass_code = self.passcode.value if self.passcode.value else None
+
+        view = ConfirmPurchaseView(
+            v_id=self.v_id,
+            item_id=self.item_id,
+            payment_method=self.payment_method,
+            qty=qty,
+            paypay_link=self.paypay_link.value,
+            passcode=pass_code,
+            final_price=final_price
+        )
+
+        await interaction.response.send_message(calc_str, view=view, ephemeral=True)
 
 class PaymentSelect(discord.ui.Select):
     def __init__(self, v_id: str, item_id: str):
@@ -546,10 +592,10 @@ async def place_vending_machine(interaction: discord.Interaction, vending_machin
         embed.description = panel_description
 
     for item_id, item in vm_data["items"].items():
-        price_info = f"マネー:{item['money']}/マネーライト:{item['manera']}"
+        price_info = f"`マネー:{item['money']}/マネーライト:{item['manera']}`"
         desc = f"{item['description']}\n" if item.get("description") else ""
         emoji_str = f"{item['emoji']} " if item.get("emoji") else ""
-        embed.add_field(name=f"枠の中に{price_info}", value=f"{emoji_str}**{item['name']}**\n{desc}", inline=False)
+        embed.add_field(name=price_info, value=f"{emoji_str}**{item['name']}**\n{desc}", inline=False)
 
     view = VendingView(vending_machine_id)
     await interaction.response.send_message(embed=embed, view=view)
