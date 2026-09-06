@@ -31,8 +31,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 vending_machines = {}
 coupons = {}
-proof_settings = {}
-stock_add_settings = {}
+proof_settings = {}        # 実績通知設定 {v_id: {"channel_id": int, "type": str}}
+stock_add_settings = {}    # 在庫追加通知設定 {v_id: {"channel_id": int}}
 paypay_client = None
 
 def parse_color(color_hex: str) -> discord.Color:
@@ -43,14 +43,27 @@ def parse_color(color_hex: str) -> discord.Color:
 
 def format_stock_item(raw_content: str) -> str:
     result = raw_content.strip()
+
+    # 文字列としての "\n" を実際の改行コードに置換
     result = result.replace("\\n", "\n")
+
+    # {{内容}} は普通のコードブロック (```\n内容\n```)
     result = re.sub(r"\{\{(.*?)\}\}", lambda m: f"```\n{m.group(1).strip()}\n```", result, flags=re.DOTALL)
+
+    # {内容} はインラインコード枠 (`内容`)
     result = re.sub(r"\{([^{}]+)\}", lambda m: f"`{m.group(1).strip()}`", result, flags=re.DOTALL)
+
+    # 文字サイズ装飾
     result = re.sub(r"###(.*?)###", lambda m: f"# {m.group(1).strip()}", result, flags=re.DOTALL)
     result = re.sub(r"##(.*?)##", lambda m: f"## {m.group(1).strip()}", result, flags=re.DOTALL)
     result = re.sub(r"#([^#\n]+)#", lambda m: f"### {m.group(1).strip()}", result, flags=re.DOTALL)
+
+    # 太字装飾
     result = re.sub(r"\+(.*?)\+", lambda m: f"**{m.group(1).strip()}**", result, flags=re.DOTALL)
+
+    # 無駄な空欄改行の自動圧縮
     result = re.sub(r"\n\s*\n+", "\n", result)
+
     return result
 
 class CloseTicketButton(discord.ui.Button):
@@ -336,6 +349,7 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
     try:
         await interaction.user.send(embed=embed)
 
+        # 実績通知の処理
         if v_id in proof_settings:
             setting = proof_settings[v_id]
             target_channel = interaction.guild.get_channel(setting["channel_id"])
