@@ -47,11 +47,11 @@ def format_stock_item(raw_content: str) -> str:
     # 文字列としての "\n" を実際の改行コードに置換
     result = result.replace("\\n", "\n")
 
-    # {{内容}} は普通のコードブロック (```\n内容\n```)
+    # 1. 二重波カッコ {{...}} を コードブロック (```\n...\n```) に変換
     result = re.sub(r"\{\{(.*?)\}\}", lambda m: f"```\n{m.group(1).strip()}\n```", result, flags=re.DOTALL)
 
-    # {内容} はインラインコード枠 (`内容`)
-    result = re.sub(r"\{([^{}]+)\}", lambda m: f"`{m.group(1).strip()}`", result, flags=re.DOTALL)
+    # 2. 単一波カッコ {...} (前後が波カッコでないもの) だけを インラインコード (`...`) に変換
+    result = re.sub(r"(?<!\{)\{([^{}\n]+)\}(?!\})", lambda m: f"`{m.group(1).strip()}`", result)
 
     # 文字サイズ装飾
     result = re.sub(r"###(.*?)###", lambda m: f"# {m.group(1).strip()}", result, flags=re.DOTALL)
@@ -61,7 +61,7 @@ def format_stock_item(raw_content: str) -> str:
     # 太字装飾
     result = re.sub(r"\+(.*?)\+", lambda m: f"**{m.group(1).strip()}**", result, flags=re.DOTALL)
 
-    # 無駄な空欄改行の自動圧縮
+    # 連続する不要な改行を整理
     result = re.sub(r"\n\s*\n+", "\n", result)
 
     return result
@@ -327,14 +327,15 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
 
     item["sold_count"] = item.get("sold_count", 0) + qty
 
-    # 改行を挟まずに生のまま在庫文字列を結合
+    # 在庫文字列の結合
     raw_stock_content = ""
     for d in drawn:
         content_str = d if isinstance(d, str) else d.get("content", "")
         raw_stock_content += content_str
 
-    # 指示通りのフォーマット（改行無しの1本化した文字列）を生成
-    full_text = f"{{ご購入ありがとうございます}}{{商品:{item['name']}}}" + raw_stock_content
+    # 波カッコエスケープ事故を防ぐ安全な文字列結合
+    header = "{{ご購入ありがとうございます}}{{商品:" + item['name'] + "}}"
+    full_text = header + raw_stock_content
 
     embed = discord.Embed(
         title="✅購入が完了しました",
