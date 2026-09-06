@@ -39,17 +39,23 @@ def parse_color(color_hex: str) -> discord.Color:
     return discord.Color(0x5865F2)
 
 def format_stock_item(raw_content: str) -> str:
-    def repl_double(match):
-        return f"```\n{match.group(1)}\n```"
+    result = raw_content
 
-    def repl_single(match):
-        return f"`{match.group(1)}`"
+    # コードブロック化 ( {} および {{}} は通常のコードブロック枠に統一 )
+    result = re.sub(r"\{\{(.*?)\}\}", r"```\n\1\n```", result, flags=re.DOTALL)
+    result = re.sub(r"\{(.*?)\}", r"```\n\1\n```", result, flags=re.DOTALL)
 
-    result = re.sub(r"\{\{(.*?)\}\}", repl_double, raw_content, flags=re.DOTALL)
-    result = re.sub(r"\{(.*?)\}", repl_single, result, flags=re.DOTALL)
+    # 文字サイズ装飾
+    result = re.sub(r"###(.*?)###", r"# \1", result, flags=re.DOTALL)  # すごくデカく
+    result = re.sub(r"##(.*?)##", r"## \1", result, flags=re.DOTALL)   # デカく
+    result = re.sub(r"#([^#\n]+)#", r"### \1", result, flags=re.DOTALL) # 少しデカく
 
-    if "{" not in raw_content and "}" not in raw_content:
-        return f"`{raw_content}`"
+    # 太字装飾
+    result = re.sub(r"\+(.*?)\+", r"**\1**", result, flags=re.DOTALL)
+
+    # 特殊記号が含まれていない場合は標準でコードブロック化
+    if not any(c in raw_content for c in ["{", "}", "#", "+"]):
+        return f"```\n{raw_content}\n```"
 
     return result
 
@@ -193,7 +199,9 @@ class MainHelpSelect(discord.ui.Select):
                 description="自販機に納品する在庫データを管理します。\n\n"
                             "**【コマンド】**\n"
                             "・`/在庫追加 <vending_machine_id>` : 商品に在庫を追加します。\n"
-                            "  ※ `{内容}` でインラインコード枠、`{{内容}}` でコードブロック枠でDM送信されます。\n"
+                            "  ※ `{内容}` または `{{内容}}` でコード枠指定。\n"
+                            "  ※ `#内容#` で少し大きく、`##内容##` で大きく、`###内容###` ですごく大きく表示。\n"
+                            "  ※ `+内容+` で太字に装飾。\n"
                             "・`/在庫内容確認 <vending_machine_id>` : 全在庫を出力します。\n"
                             "・`/在庫引出 <vending_machine_id> <quantity>` : 在庫を指定数引き出します。",
                 color=discord.Color.orange()
@@ -318,19 +326,18 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
         content_str = d if isinstance(d, str) else d.get("content", "")
         delivery_blocks.append(format_stock_item(content_str))
 
-    # 自販機パネルと同じ緑色のEmbed枠を作成
     embed = discord.Embed(
         title="✅ 購入が完了しました",
         color=discord.Color.green()
     )
 
-    # パネル内に無駄な空行を作らず詰めて配置
+    # 余分な空欄改行が発生しないよう \n で結合
     desc_lines = [
         "```\nご購入ありがとうございます\n```",
         f"```\n商品:{item['name']}\n```",
     ]
     if delivery_blocks:
-        desc_lines.append("\n".join(delivery_blocks))
+        desc_lines.extend(delivery_blocks)
 
     embed.description = "\n".join(desc_lines)
 
@@ -398,7 +405,7 @@ class PayPayPaymentModal(discord.ui.Modal, title="PayPay決済"):
 
         self.paypay_link = discord.ui.TextInput(
             label="PayPayリンク",
-            placeholder="https://pay.paypay.ne.jp/...",
+            placeholder="[https://pay.paypay.ne.jp/](https://pay.paypay.ne.jp/)...",
             required=True
         )
         self.passcode = discord.ui.TextInput(
@@ -701,7 +708,7 @@ class VendingView(discord.ui.View):
             stock_num = "無限" if i_data["type"] == "無限" else str(len(i_data.get("stock_list", [])))
             sold_num = i_data.get("sold_count", 0)
 
-            # 1つのコードブロックにまとめて空行・枠間の隙間を削除
+            # 在庫数と売上数の間の空行を削除
             item_block = (
                 f"```\n"
                 f"{i_data['name']}\n"
@@ -1054,7 +1061,7 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
             content = discord.ui.TextInput(
                 label="商品内容",
                 style=discord.TextStyle.paragraph,
-                placeholder="例: {アイテムコード} または {{長文テキスト}}",
+                placeholder="例: {コード} / #少し大# / ##大## / ###特大### / +太字+",
                 required=True,
                 max_length=1500
             )
