@@ -327,24 +327,20 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
 
     item["sold_count"] = item.get("sold_count", 0) + qty
 
-    delivery_blocks = []
+    # 改行を挟まずに生のまま在庫文字列を結合
+    raw_stock_content = ""
     for d in drawn:
         content_str = d if isinstance(d, str) else d.get("content", "")
-        delivery_blocks.append(format_stock_item(content_str))
+        raw_stock_content += content_str
+
+    # 指示通りのフォーマット（改行無しの1本化した文字列）を生成
+    full_text = f"{{ご購入ありがとうございます}}{{商品:{item['name']}}}" + raw_stock_content
 
     embed = discord.Embed(
         title="✅購入が完了しました",
+        description=format_stock_item(full_text),
         color=discord.Color.green()
     )
-
-    desc_lines = [
-        "```\nご購入ありがとうございます\n```",
-        f"```\n商品:{item['name']}\n```"
-    ]
-    if delivery_blocks:
-        desc_lines.extend(delivery_blocks)
-
-    embed.description = "\n".join(desc_lines)
 
     try:
         await interaction.user.send(embed=embed)
