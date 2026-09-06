@@ -1,6 +1,8 @@
 import os
 import uuid
 import re
+import json
+import io
 from threading import Thread
 
 import discord
@@ -142,6 +144,7 @@ class MainHelpSelect(discord.ui.Select):
             discord.SelectOption(label="自販機・商品管理", value="vending", description="自販機作成・設置・商品登録・削除", emoji="🛒"),
             discord.SelectOption(label="在庫管理", value="stock", description="在庫の追加・内容確認・引き出し", emoji="📦"),
             discord.SelectOption(label="クーポン管理", value="coupon", description="割引クーポンの作成・一覧・削除", emoji="🏷️"),
+            discord.SelectOption(label="データ保存・復元", value="save_load", description="データのセーブ・ロード", emoji="💾"),
         ]
         super().__init__(placeholder="詳しく知りたい機能を選択してください...", min_values=1, max_values=1, options=options)
 
@@ -204,6 +207,14 @@ class MainHelpSelect(discord.ui.Select):
                             "・`/クーポン削除 ...` : クーポンを削除します。",
                 color=discord.Color.purple()
             ),
+            "save_load": discord.Embed(
+                title="💾 データ保存・復元の詳細",
+                description="再デプロイ等でBotのデータが消えるのを防ぐ機能です。\n\n"
+                            "**【コマンド】**\n"
+                            "・`/save` : 自販機や在庫のデータをインラインコード文字列で出力します。\n"
+                            "・`/load <data_text>` : 出力されたテキストを入力してデータを復元します。",
+                color=discord.Color.teal()
+            ),
         }
         await interaction.response.send_message(embed=embeds[val], ephemeral=True)
 
@@ -265,7 +276,6 @@ class MemberHelpSelect(discord.ui.Select):
                 color=discord.Color.red()
             ),
         }
-        # 公開埋め込みとしてメッセージを送信（ephemeral=Trueを排除）
         await interaction.response.send_message(embed=embeds[val])
 
 class MemberHelpView(discord.ui.View):
@@ -728,6 +738,7 @@ async def help_all_cmd(interaction: discord.Interaction):
     embed.add_field(name="🛒 自販機管理", value="`/自販機作成`, `/自販機設置` など", inline=True)
     embed.add_field(name="📦 在庫管理", value="`/在庫追加`, `/在庫内容確認` など", inline=True)
     embed.add_field(name="🏷️ クーポン管理", value="`/クーポン作成`, `/クーポン一覧` など", inline=True)
+    embed.add_field(name="💾 セーブ/ロード", value="`/save`, `/load` でデータを保管", inline=True)
     embed.add_field(name="🧹 メッセージ削除", value="`/clear` : チャンネルメッセージ削除", inline=True)
 
     await interaction.response.send_message(embed=embed, view=MainHelpView(), ephemeral=True)
@@ -745,10 +756,63 @@ async def help_member_cmd(interaction: discord.Interaction):
     embed.add_field(name="📩 商品受取", value="購入完了時のDM受取と設定確認", inline=False)
     embed.add_field(name="❓ FAQ", value="トラブル時の対処法", inline=False)
 
-    # 自販機のようにチャンネル内へ常駐埋め込みとして送信（ephemeral=Trueを削除）
     await interaction.response.send_message(embed=embed, view=MemberHelpView())
 
 bot.tree.add_command(help_group)
+
+# --- セーブ・ロードコマンド追加部分 ---
+
+@bot.tree.command(name="save", description="現在の自販機・在庫・クーポンデータをテキスト列としてセーブします")
+async def save_cmd(interaction: discord.Interaction):
+    data = {
+        "vending_machines": vending_machines,
+        "coupons": coupons
+    }
+    # JSON文字列に変換
+    json_str = json.dumps(data, ensure_ascii=False)
+    
+    # インラインコード枠で囲む
+    output_text = f"`{json_str}`"
+    
+    # Discordの2000文字上限チェック
+    if len(output_text) > 2000:
+        file_obj = io.BytesIO(json_str.encode('utf-8'))
+        await interaction.response.send_message(
+            "⚠️ データ量が多く2000文字を超えたため、テキストファイルとして出力しました。\n中身のテキストをコピーして `/load` で読み込んでください。",
+            file=discord.File(fp=file_obj, filename="save_data.json"),
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"✅ **セーブデータを出力しました！**\n下記のテキストをコピーし、`/load` コマンドに入力して復元してください：\n{output_text}",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="load", description="保存したテキスト列を入力して自販機データを復元します")
+@app_commands.describe(data_text="セーブ時に出力されたテキスト列を入力")
+async def load_cmd(interaction: discord.Interaction, data_text: str):
+    global vending_machines, coupons
+    try:
+        # バックティック（`）や前後の余白を削ってクリーンにする
+        clean_text = data_text.strip("` ").strip()
+        data = json.loads(clean_text)
+        
+        if "vending_machines" in data:
+            vending_machines.clear()
+            vending_machines.update(data.get("vending_machines", {}))
+            coupons.clear()
+            coupons.update(data.get("coupons", {}))
+            await interaction.response.send_message("✅ 自販機・在庫・クーポンデータを正常に復元（ロード）しました！", ephemeral=True)
+        else:
+            # 万が一直接自販機データのみが渡された場合の互換処理
+            vending_machines.clear()
+            vending_machines.update(data)
+            await interaction.response.send_message("✅ 自販機データを正常に復元（ロード）しました！", ephemeral=True)
+            
+    except Exception as e:
+        await interaction.response.send_message(f"❌ データのロードに失敗しました。セーブデータのテキスト列が正しいか確認してください。\n詳細: `{e}`", ephemeral=True)
+
+# -----------------------------------
 
 @bot.event
 async def on_ready():
