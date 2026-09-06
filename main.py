@@ -69,7 +69,7 @@ class TicketCloseView(discord.ui.View):
 class TicketButton(discord.ui.Button):
     def __init__(self, label: str, button_color: str):
         style = discord.ButtonStyle.primary
-        if button_color.startswith("#"):
+        if button_color and button_color.startswith("#"):
             style = discord.ButtonStyle.primary
 
         super().__init__(style=style, label=label, custom_id="create_ticket_btn")
@@ -211,7 +211,7 @@ class MainHelpSelect(discord.ui.Select):
                 title="💾 データ保存・復元の詳細",
                 description="再デプロイ等でBotのデータが消えるのを防ぐ機能です。\n\n"
                             "**【コマンド】**\n"
-                            "・`/save` : 自販機や在庫のデータをインラインコード文字列で出力します。\n"
+                            "・`/save` : 自販機・在庫・売上データをインラインコード文字列で出力します。\n"
                             "・`/load <data_text>` : 出力されたテキストを入力してデータを復元します。",
                 color=discord.Color.teal()
             ),
@@ -311,14 +311,17 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
     else:
         drawn = [stock_list[0]] * qty if stock_list else []
 
+    # 売上数を加算
+    item["sold_count"] = item.get("sold_count", 0) + qty
+
     delivery_blocks = []
     for d in drawn:
         content_str = d if isinstance(d, str) else d.get("content", "")
         delivery_blocks.append(format_stock_item(content_str))
 
-    # DM送信用メッセージフォーマット（ご指定の仕様に合わせて作成）
+    # 空行（2回改行）をなくしたDM整形
     dm_text = (
-        "## **✅購入が完了しました**\n"
+        "# **✅購入が完了しました**\n"
         "```\nご購入ありがとうございます\n```\n"
         f"```\n商品:{item['name']}\n```\n"
         + "\n".join(delivery_blocks)
@@ -650,6 +653,7 @@ class VendingView(discord.ui.View):
         super().__init__(timeout=None)
         self.vending_machine_id = vending_machine_id
 
+    # 黄緑色（Success）の購入ボタン
     @discord.ui.button(label="🛒購入する", style=discord.ButtonStyle.success, custom_id="vending_buy_btn")
     async def buy_cb(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
@@ -677,6 +681,7 @@ class VendingView(discord.ui.View):
         item_view.add_item(select)
         await interaction.followup.send("商品を選択してください", view=item_view, ephemeral=True)
 
+    # 赤色（Danger）の在庫確認ボタン
     @discord.ui.button(label="在庫確認", style=discord.ButtonStyle.danger, custom_id="vending_stock_btn")
     async def stock_cb(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
@@ -689,9 +694,19 @@ class VendingView(discord.ui.View):
         stock_info = []
         for i_id, i_data in vm_data["items"].items():
             stock_num = "無限" if i_data["type"] == "無限" else str(len(i_data.get("stock_list", [])))
-            stock_info.append(f"**{i_data['name']}**\n在庫:{stock_num}")
+            sold_num = i_data.get("sold_count", 0)
 
-        msg = "\n\n".join(stock_info)
+            # 指定形式に変更
+            # ```商品名```
+            # ```在庫:X
+            # 売上:Y```
+            item_block = (
+                f"```\n{i_data['name']}\n```\n"
+                f"```\n在庫:{stock_num}\n売上:{sold_num}\n```"
+            )
+            stock_info.append(item_block)
+
+        msg = "\n".join(stock_info)
         await interaction.followup.send(msg, ephemeral=True)
 
 class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
@@ -761,7 +776,9 @@ async def help_member_cmd(interaction: discord.Interaction):
 
 bot.tree.add_command(help_group)
 
-@bot.tree.command(name="save", description="現在の自販機・在庫・クーポンデータをテキスト列としてセーブします")
+# --- セーブ・ロードコマンド ---
+
+@bot.tree.command(name="save", description="現在の自販機・在庫・売上・クーポンデータをテキスト列としてセーブします")
 async def save_cmd(interaction: discord.Interaction):
     data = {
         "vending_machines": vending_machines,
@@ -769,7 +786,7 @@ async def save_cmd(interaction: discord.Interaction):
     }
     json_str = json.dumps(data, ensure_ascii=False)
     output_text = f"`{json_str}`"
-    
+
     if len(output_text) > 2000:
         file_obj = io.BytesIO(json_str.encode('utf-8'))
         await interaction.response.send_message(
@@ -790,20 +807,22 @@ async def load_cmd(interaction: discord.Interaction, data_text: str):
     try:
         clean_text = data_text.strip("` ").strip()
         data = json.loads(clean_text)
-        
+
         if "vending_machines" in data:
             vending_machines.clear()
             vending_machines.update(data.get("vending_machines", {}))
             coupons.clear()
             coupons.update(data.get("coupons", {}))
-            await interaction.response.send_message("✅ 自販機・在庫・クーポンデータを正常に復元（ロード）しました！", ephemeral=True)
+            await interaction.response.send_message("✅ 自販機・在庫・売上・クーポンデータを正常に復元（ロード）しました！", ephemeral=True)
         else:
             vending_machines.clear()
             vending_machines.update(data)
             await interaction.response.send_message("✅ 自販機データを正常に復元（ロード）しました！", ephemeral=True)
-            
+
     except Exception as e:
         await interaction.response.send_message(f"❌ データのロードに失敗しました。セーブデータのテキスト列が正しいか確認してください。\n詳細: `{e}`", ephemeral=True)
+
+# -----------------------------------
 
 @bot.event
 async def on_ready():
@@ -981,6 +1000,7 @@ async def add_item(interaction: discord.Interaction, vending_machine_id: str, ty
         "description": description,
         "emoji": emoji,
         "stock_list": [],
+        "sold_count": 0,  # 初期売上数
     }
 
     vm_name = vending_machines[vending_machine_id]["name"]
