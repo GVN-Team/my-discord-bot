@@ -41,11 +41,14 @@ def parse_color(color_hex: str) -> discord.Color:
 def format_stock_item(raw_content: str) -> str:
     result = raw_content.strip()
 
-    # {{内容}} は絶対インラインコード枠 (`内容`)
-    result = re.sub(r"\{\{(.*?)\}\}", lambda m: f"`{m.group(1).strip()}`", result, flags=re.DOTALL)
+    # 文字列としての "\n" を実際の改行コードに置換
+    result = result.replace("\\n", "\n")
 
-    # {内容} は通常のコードブロック (```\n内容\n```)
-    result = re.sub(r"\{([^{}]+)\}", lambda m: f"```\n{m.group(1).strip()}\n```", result, flags=re.DOTALL)
+    # {{内容}} は普通のコードブロック (```\n内容\n```)
+    result = re.sub(r"\{\{(.*?)\}\}", lambda m: f"```\n{m.group(1).strip()}\n```", result, flags=re.DOTALL)
+
+    # {内容} はインラインコード枠 (`内容`)
+    result = re.sub(r"\{([^{}]+)\}", lambda m: f"`{m.group(1).strip()}`", result, flags=re.DOTALL)
 
     # 文字サイズ装飾
     result = re.sub(r"###(.*?)###", lambda m: f"# {m.group(1).strip()}", result, flags=re.DOTALL)
@@ -55,7 +58,7 @@ def format_stock_item(raw_content: str) -> str:
     # 太字装飾
     result = re.sub(r"\+(.*?)\+", lambda m: f"**{m.group(1).strip()}**", result, flags=re.DOTALL)
 
-    # 連続する無駄な空欄改行を完全に1つの改行へ圧縮
+    # 無駄な空欄改行の自動圧縮
     result = re.sub(r"\n\s*\n+", "\n", result)
 
     return result
@@ -102,7 +105,7 @@ class TicketButton(discord.ui.Button):
 
         embed = discord.Embed(
             title="お問い合わせチケット",
-            description=f"{user.mention} 様\nお問い合わせ内容を入力してお待ちください。\n対応が完了したら「チケットを閉じる」ボタンを押してください。",
+            description=f"{user.mention} 様\nお問い合わせ内容を入力してお命ちください。\n対応が完了したら「チケットを閉じる」ボタンを押してください。",
             color=discord.Color.blue()
         )
 
@@ -200,7 +203,8 @@ class MainHelpSelect(discord.ui.Select):
                 description="自販機に納品する在庫データを管理します。\n\n"
                             "**【コマンド】**\n"
                             "・`/在庫追加 <vending_machine_id>` : 商品に在庫を追加します。\n"
-                            "  ※ `{{内容}}` でインラインコード枠、`{内容}` でコードブロック。\n"
+                            "  ※ `{内容}` でインラインコード枠、`{{内容}}` でコードブロック。\n"
+                            "  ※ 改行したい場所には `\\n` を入力してください。\n"
                             "  ※ `#内容#` で少し大きく、`##内容##` で大きく、`###内容###` ですごく大きく表示。\n"
                             "  ※ `+内容+` で太字に装飾。\n"
                             "・`/在庫内容確認 <vending_machine_id>` : 全在庫を出力します。\n"
@@ -339,7 +343,6 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
     if delivery_blocks:
         desc_lines.extend(delivery_blocks)
 
-    # 空欄改行を除去して結合
     cleaned_desc = "\n".join([line.strip() for line in desc_lines if line and line.strip()])
     embed.description = re.sub(r"\n\s*\n+", "\n", cleaned_desc)
 
@@ -407,7 +410,7 @@ class PayPayPaymentModal(discord.ui.Modal, title="PayPay決済"):
 
         self.paypay_link = discord.ui.TextInput(
             label="PayPayリンク",
-            placeholder="[https://pay.paypay.ne.jp/](https://pay.paypay.ne.jp/)...",
+            placeholder="https://pay.paypay.ne.jp/...",
             required=True
         )
         self.passcode = discord.ui.TextInput(
@@ -710,7 +713,6 @@ class VendingView(discord.ui.View):
             stock_num = "無限" if i_data["type"] == "無限" else str(len(i_data.get("stock_list", [])))
             sold_num = i_data.get("sold_count", 0)
 
-            # 在庫数と売上数の間の空行を除去した完全指定フォーマット
             item_block = (
                 f"```\n"
                 f"<{i_data['name']}>\n"
@@ -1061,9 +1063,9 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
 
         class AddStockModal(discord.ui.Modal, title="在庫内容追加"):
             content = discord.ui.TextInput(
-                label="商品内容",
+                label="商品内容 (改行は \\n を使用してください)",
                 style=discord.TextStyle.paragraph,
-                placeholder="例: {{インラインコード}} / {コードブロック} / #少し大# / +太字+",
+                placeholder="例: {インラインコード} / {{コードブロック}} / 改行は\\nと入力",
                 required=True,
                 max_length=1500
             )
