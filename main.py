@@ -337,9 +337,10 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
         color=discord.Color.green()
     )
 
+    # 1回の改行でつながるフォーマット構成
     desc_lines = [
         "```\nご購入ありがとうございます\n```",
-        f"商品:{item['name']}",
+        f"```\n商品:{item['name']}\n```"
     ]
     if delivery_blocks:
         desc_lines.extend(delivery_blocks)
