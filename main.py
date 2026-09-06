@@ -3,6 +3,7 @@ import uuid
 import re
 import json
 import io
+from datetime import datetime
 from threading import Thread
 
 import discord
@@ -30,6 +31,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 vending_machines = {}
 coupons = {}
+proof_settings = {}        # 実績通知設定 {v_id: {"channel_id": int, "type": str}}
+stock_add_settings = {}    # 在庫追加通知設定 {v_id: {"channel_id": int}}
 paypay_client = None
 
 def parse_color(color_hex: str) -> discord.Color:
@@ -105,7 +108,7 @@ class TicketButton(discord.ui.Button):
 
         embed = discord.Embed(
             title="お問い合わせチケット",
-            description=f"{user.mention} 様\nお問い合わせ内容を入力してお命ちください。\n対応が完了したら「チケットを閉じる」ボタンを押してください。",
+            description=f"{user.mention} 様\nお問い合わせ内容を入力してお待ちください。\n対応が完了したら「チケットを閉じる」ボタンを押してください。",
             color=discord.Color.blue()
         )
 
@@ -205,8 +208,6 @@ class MainHelpSelect(discord.ui.Select):
                             "・`/在庫追加 <vending_machine_id>` : 商品に在庫を追加します。\n"
                             "  ※ `{内容}` でインラインコード枠、`{{内容}}` でコードブロック。\n"
                             "  ※ 改行したい場所には `\\n` を入力してください。\n"
-                            "  ※ `#内容#` で少し大きく、`##内容##` で大きく、`###内容###` ですごく大きく表示。\n"
-                            "  ※ `+内容+` で太字に装飾。\n"
                             "・`/在庫内容確認 <vending_machine_id>` : 全在庫を出力します。\n"
                             "・`/在庫引出 <vending_machine_id> <quantity>` : 在庫を指定数引き出します。",
                 color=discord.Color.orange()
@@ -332,22 +333,43 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
         delivery_blocks.append(format_stock_item(content_str))
 
     embed = discord.Embed(
-        title="✅ 購入が完了しました",
+        title="✅購入が完了しました",
         color=discord.Color.green()
     )
 
     desc_lines = [
         "```\nご購入ありがとうございます\n```",
-        f"```\n商品:{item['name']}\n```",
+        f"商品:{item['name']}",
     ]
     if delivery_blocks:
         desc_lines.extend(delivery_blocks)
 
-    cleaned_desc = "\n".join([line.strip() for line in desc_lines if line and line.strip()])
-    embed.description = re.sub(r"\n\s*\n+", "\n", cleaned_desc)
+    embed.description = "\n".join(desc_lines)
 
     try:
         await interaction.user.send(embed=embed)
+
+        # 実績通知の処理
+        if v_id in proof_settings:
+            setting = proof_settings[v_id]
+            target_channel = interaction.guild.get_channel(setting["channel_id"])
+            if target_channel:
+                user_disp = f"@{interaction.user.name}" if setting["type"] == "表示" else "@不明"
+                now_str = datetime.now().strftime("%Y/%m/%d/%H:%M:%S.%f")[:-3]
+                vm_name = vending_machines[v_id]["name"]
+                ch_mention = interaction.channel.mention
+
+                proof_desc = (
+                    f"購入者\n```\n{user_disp}\n```\n"
+                    f"チャンネル\n```\n{ch_mention}\n```\n"
+                    f"自販機\n```\n{vm_name}\n```\n"
+                    f"商品名\n```\n{item['name']}\n```\n"
+                    f"個数\n```\n{qty}\n```\n"
+                    f"購入日\n```\n{now_str}\n```"
+                )
+                proof_embed = discord.Embed(description=proof_desc, color=discord.Color.green())
+                await target_channel.send(embed=proof_embed)
+
         return True
     except discord.Forbidden:
         await interaction.followup.send("❌ DMの送信に失敗しました。DMの受取許可設定を確認してください。", ephemeral=True)
@@ -796,7 +818,9 @@ bot.tree.add_command(help_group)
 async def save_cmd(interaction: discord.Interaction):
     data = {
         "vending_machines": vending_machines,
-        "coupons": coupons
+        "coupons": coupons,
+        "proof_settings": proof_settings,
+        "stock_add_settings": stock_add_settings
     }
     json_str = json.dumps(data, ensure_ascii=False)
     output_text = f"`{json_str}`"
@@ -817,7 +841,7 @@ async def save_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="load", description="保存したテキスト列を入力して自販機データを復元します")
 @app_commands.describe(data_text="セーブ時に出力されたテキスト列を入力")
 async def load_cmd(interaction: discord.Interaction, data_text: str):
-    global vending_machines, coupons
+    global vending_machines, coupons, proof_settings, stock_add_settings
     try:
         clean_text = data_text.strip("` ").strip()
         data = json.loads(clean_text)
@@ -827,7 +851,11 @@ async def load_cmd(interaction: discord.Interaction, data_text: str):
             vending_machines.update(data.get("vending_machines", {}))
             coupons.clear()
             coupons.update(data.get("coupons", {}))
-            await interaction.response.send_message("✅ 自販機・在庫・売上・クーポンデータを正常に復元（ロード）しました！", ephemeral=True)
+            proof_settings.clear()
+            proof_settings.update(data.get("proof_settings", {}))
+            stock_add_settings.clear()
+            stock_add_settings.update(data.get("stock_add_settings", {}))
+            await interaction.response.send_message("✅ データを正常に復元（ロード）しました！", ephemeral=True)
         else:
             vending_machines.clear()
             vending_machines.update(data)
@@ -954,6 +982,10 @@ async def delete_vending_machine(interaction: discord.Interaction, vending_machi
 
     async def delete_cb(inter: discord.Interaction):
         del vending_machines[vending_machine_id]
+        if vending_machine_id in proof_settings:
+            del proof_settings[vending_machine_id]
+        if vending_machine_id in stock_add_settings:
+            del stock_add_settings[vending_machine_id]
         await inter.response.edit_message(content=f"自販機「{target_name}」を完全に削除しました。", embed=None, view=None)
 
     async def cancel_cb(inter: discord.Interaction):
@@ -1077,9 +1109,33 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
                 raw_text = self.content.value.strip()
                 item["stock_list"].append(raw_text)
 
+                # 追加個数の計算 (\n で区切られた数をカウント)
+                added_count = len([x for x in raw_text.split("\\n") if x.strip()])
+                if added_count == 0:
+                    added_count = 1
+
                 formatted = format_stock_item(raw_text)
                 res_text = f"追加した商品は購入時に送信されます:\n{formatted}"
                 await m_inter.response.send_message(res_text, ephemeral=True)
+
+                # 在庫追加通知の処理
+                if vending_machine_id in stock_add_settings:
+                    setting = stock_add_settings[vending_machine_id]
+                    target_channel = m_inter.guild.get_channel(setting["channel_id"])
+                    if target_channel:
+                        now_str = datetime.now().strftime("%Y/%m/%d/%H:%M:%S.%f")[:-3]
+                        vm_name = vm["name"]
+                        ch_mention = m_inter.channel.mention
+
+                        add_desc = (
+                            f"チャンネル\n```\n{ch_mention}\n```\n"
+                            f"自販機\n```\n{vm_name}\n```\n"
+                            f"商品名\n```\n{item['name']}\n```\n"
+                            f"個数\n```\n{added_count}\n```\n"
+                            f"購入日\n```\n{now_str}\n```"
+                        )
+                        add_embed = discord.Embed(description=add_desc, color=discord.Color.green())
+                        await target_channel.send(embed=add_embed)
 
         await inter.response.send_modal(AddStockModal())
 
@@ -1154,6 +1210,77 @@ async def withdraw_stock(interaction: discord.Interaction, vending_machine_id: s
     view = discord.ui.View(timeout=None)
     view.add_item(select)
     await interaction.response.send_message("商品を選択してください", view=view, ephemeral=True)
+
+@bot.tree.command(name="実績通知設定", description="購入時に実績通知を送信する設定を行います")
+@app_commands.describe(
+    vending_machine_id="購入したかを検知する自販機",
+    channel="実績を送信するチャンネル",
+    type="ユーザー名の表示/非表示"
+)
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+@app_commands.choices(type=[
+    app_commands.Choice(name="表示", value="表示"),
+    app_commands.Choice(name="非表示", value="非表示")
+])
+async def set_proof_notification(interaction: discord.Interaction, vending_machine_id: str, channel: discord.TextChannel, type: str):
+    if vending_machine_id not in vending_machines:
+        await interaction.response.send_message("❌ 指定された自販機が存在しません。", ephemeral=True)
+        return
+
+    proof_settings[vending_machine_id] = {
+        "channel_id": channel.id,
+        "type": type
+    }
+
+    vm_name = vending_machines[vending_machine_id]["name"]
+    await interaction.response.send_message(
+        f"✅ 自販機「{vm_name}」の実績通知を設定しました。\n"
+        f"送信先: {channel.mention}\n"
+        f"ユーザー名表記: {type}",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="実績通知設定remove", description="実績通知設定を削除します")
+@app_commands.describe(vending_machine_id="実績通知を外す自販機")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+async def remove_proof_notification(interaction: discord.Interaction, vending_machine_id: str):
+    if vending_machine_id in proof_settings:
+        del proof_settings[vending_machine_id]
+        await interaction.response.send_message("✅ 実績通知設定を解除しました。", ephemeral=True)
+    else:
+        await interaction.response.send_message("⚠️ この自販機には実績通知が設定されていません。", ephemeral=True)
+
+@bot.tree.command(name="在庫追加通知", description="在庫が追加されたときに通知を送信する設定を行います")
+@app_commands.describe(
+    vending_machine_id="在庫追加を検知する自販機",
+    channel="在庫追加通知を送信するチャンネル"
+)
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+async def set_stock_add_notification(interaction: discord.Interaction, vending_machine_id: str, channel: discord.TextChannel):
+    if vending_machine_id not in vending_machines:
+        await interaction.response.send_message("❌ 指定された自販機が存在しません。", ephemeral=True)
+        return
+
+    stock_add_settings[vending_machine_id] = {
+        "channel_id": channel.id
+    }
+
+    vm_name = vending_machines[vending_machine_id]["name"]
+    await interaction.response.send_message(
+        f"✅ 自販機「{vm_name}」の在庫追加通知を設定しました。\n"
+        f"送信先: {channel.mention}",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="在庫追加通知remove", description="在庫追加通知設定を削除します")
+@app_commands.describe(vending_machine_id="在庫追加通知を外す自販機")
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+async def remove_stock_add_notification(interaction: discord.Interaction, vending_machine_id: str):
+    if vending_machine_id in stock_add_settings:
+        del stock_add_settings[vending_machine_id]
+        await interaction.response.send_message("✅ 在庫追加通知設定を解除しました。", ephemeral=True)
+    else:
+        await interaction.response.send_message("⚠️ この自販機には在庫追加通知が設定されていません。", ephemeral=True)
 
 @bot.tree.command(name="クーポン作成", description="クーポンを作成します")
 @app_commands.describe(vending_machine_id="クーポンを利用できる自販機", code="クーポンコード", coupon="適用金額")
