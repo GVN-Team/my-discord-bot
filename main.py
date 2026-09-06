@@ -316,14 +316,16 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
         content_str = d if isinstance(d, str) else d.get("content", "")
         delivery_blocks.append(format_stock_item(content_str))
 
+    # 指定されたDM送信フォーマット
     dm_text = (
-        "# **✅ 購入が完了しました！**\n"
+        "# **✅購入が完了しました**\n"
         "```\nご購入ありがとうございます\n```\n"
         f"```\n商品:{item['name']}\n```\n"
         + "\n".join(delivery_blocks)
     )
 
     try:
+        # ボタンやリスト等のViewは付けずにテキストメッセージのみ送信
         await interaction.user.send(dm_text)
         return True
     except discord.Forbidden:
@@ -387,7 +389,7 @@ class PayPayPaymentModal(discord.ui.Modal, title="PayPay決済"):
 
         self.paypay_link = discord.ui.TextInput(
             label="PayPayリンク",
-            placeholder="https://pay.paypay.ne.jp/...",
+            placeholder="[https://pay.paypay.ne.jp/](https://pay.paypay.ne.jp/)...",
             required=True
         )
         self.passcode = discord.ui.TextInput(
@@ -760,21 +762,15 @@ async def help_member_cmd(interaction: discord.Interaction):
 
 bot.tree.add_command(help_group)
 
-# --- セーブ・ロードコマンド追加部分 ---
-
 @bot.tree.command(name="save", description="現在の自販機・在庫・クーポンデータをテキスト列としてセーブします")
 async def save_cmd(interaction: discord.Interaction):
     data = {
         "vending_machines": vending_machines,
         "coupons": coupons
     }
-    # JSON文字列に変換
     json_str = json.dumps(data, ensure_ascii=False)
-    
-    # インラインコード枠で囲む
     output_text = f"`{json_str}`"
     
-    # Discordの2000文字上限チェック
     if len(output_text) > 2000:
         file_obj = io.BytesIO(json_str.encode('utf-8'))
         await interaction.response.send_message(
@@ -793,7 +789,6 @@ async def save_cmd(interaction: discord.Interaction):
 async def load_cmd(interaction: discord.Interaction, data_text: str):
     global vending_machines, coupons
     try:
-        # バックティック（`）や前後の余白を削ってクリーンにする
         clean_text = data_text.strip("` ").strip()
         data = json.loads(clean_text)
         
@@ -804,15 +799,12 @@ async def load_cmd(interaction: discord.Interaction, data_text: str):
             coupons.update(data.get("coupons", {}))
             await interaction.response.send_message("✅ 自販機・在庫・クーポンデータを正常に復元（ロード）しました！", ephemeral=True)
         else:
-            # 万が一直接自販機データのみが渡された場合の互換処理
             vending_machines.clear()
             vending_machines.update(data)
             await interaction.response.send_message("✅ 自販機データを正常に復元（ロード）しました！", ephemeral=True)
             
     except Exception as e:
         await interaction.response.send_message(f"❌ データのロードに失敗しました。セーブデータのテキスト列が正しいか確認してください。\n詳細: `{e}`", ephemeral=True)
-
-# -----------------------------------
 
 @bot.event
 async def on_ready():
