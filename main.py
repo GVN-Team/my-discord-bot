@@ -311,7 +311,6 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
     else:
         drawn = [stock_list[0]] * qty if stock_list else []
 
-    # 売上数を加算
     item["sold_count"] = item.get("sold_count", 0) + qty
 
     delivery_blocks = []
@@ -319,16 +318,24 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
         content_str = d if isinstance(d, str) else d.get("content", "")
         delivery_blocks.append(format_stock_item(content_str))
 
-    # 空行（2回改行）をなくしたDM整形
-    dm_text = (
-        "# **✅購入が完了しました**\n"
-        "```\nご購入ありがとうございます\n```\n"
-        f"```\n商品:{item['name']}\n```\n"
-        + "\n".join(delivery_blocks)
+    # 自販機パネルと同じ緑色のEmbed枠を作成
+    embed = discord.Embed(
+        title="✅ 購入が完了しました",
+        color=discord.Color.green()
     )
 
+    # パネル内に無駄な空行を作らず詰めて配置
+    desc_lines = [
+        "```\nご購入ありがとうございます\n```",
+        f"```\n商品:{item['name']}\n```",
+    ]
+    if delivery_blocks:
+        desc_lines.append("\n".join(delivery_blocks))
+
+    embed.description = "\n".join(desc_lines)
+
     try:
-        await interaction.user.send(dm_text)
+        await interaction.user.send(embed=embed)
         return True
     except discord.Forbidden:
         await interaction.followup.send("❌ DMの送信に失敗しました。DMの受取許可設定を確認してください。", ephemeral=True)
@@ -653,7 +660,6 @@ class VendingView(discord.ui.View):
         super().__init__(timeout=None)
         self.vending_machine_id = vending_machine_id
 
-    # 黄緑色（Success）の購入ボタン
     @discord.ui.button(label="🛒購入する", style=discord.ButtonStyle.success, custom_id="vending_buy_btn")
     async def buy_cb(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
@@ -681,7 +687,6 @@ class VendingView(discord.ui.View):
         item_view.add_item(select)
         await interaction.followup.send("商品を選択してください", view=item_view, ephemeral=True)
 
-    # 赤色（Danger）の在庫確認ボタン
     @discord.ui.button(label="在庫確認", style=discord.ButtonStyle.danger, custom_id="vending_stock_btn")
     async def stock_cb(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
@@ -696,13 +701,13 @@ class VendingView(discord.ui.View):
             stock_num = "無限" if i_data["type"] == "無限" else str(len(i_data.get("stock_list", [])))
             sold_num = i_data.get("sold_count", 0)
 
-            # 指定形式に変更
-            # ```商品名```
-            # ```在庫:X
-            # 売上:Y```
+            # 1つのコードブロックにまとめて空行・枠間の隙間を削除
             item_block = (
-                f"```\n{i_data['name']}\n```\n"
-                f"```\n在庫:{stock_num}\n売上:{sold_num}\n```"
+                f"```\n"
+                f"{i_data['name']}\n"
+                f"在庫:{stock_num}\n"
+                f"売上:{sold_num}\n"
+                f"```"
             )
             stock_info.append(item_block)
 
@@ -776,8 +781,6 @@ async def help_member_cmd(interaction: discord.Interaction):
 
 bot.tree.add_command(help_group)
 
-# --- セーブ・ロードコマンド ---
-
 @bot.tree.command(name="save", description="現在の自販機・在庫・売上・クーポンデータをテキスト列としてセーブします")
 async def save_cmd(interaction: discord.Interaction):
     data = {
@@ -821,8 +824,6 @@ async def load_cmd(interaction: discord.Interaction, data_text: str):
 
     except Exception as e:
         await interaction.response.send_message(f"❌ データのロードに失敗しました。セーブデータのテキスト列が正しいか確認してください。\n詳細: `{e}`", ephemeral=True)
-
-# -----------------------------------
 
 @bot.event
 async def on_ready():
@@ -1000,7 +1001,7 @@ async def add_item(interaction: discord.Interaction, vending_machine_id: str, ty
         "description": description,
         "emoji": emoji,
         "stock_list": [],
-        "sold_count": 0,  # 初期売上数
+        "sold_count": 0,
     }
 
     vm_name = vending_machines[vending_machine_id]["name"]
