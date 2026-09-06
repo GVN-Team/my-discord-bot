@@ -39,23 +39,24 @@ def parse_color(color_hex: str) -> discord.Color:
     return discord.Color(0x5865F2)
 
 def format_stock_item(raw_content: str) -> str:
-    result = raw_content
+    result = raw_content.strip()
 
-    # コードブロック化 ( {} および {{}} は通常のコードブロック枠に統一 )
-    result = re.sub(r"\{\{(.*?)\}\}", r"```\n\1\n```", result, flags=re.DOTALL)
-    result = re.sub(r"\{(.*?)\}", r"```\n\1\n```", result, flags=re.DOTALL)
+    # {{内容}} は絶対インラインコード枠 (`内容`)
+    result = re.sub(r"\{\{(.*?)\}\}", lambda m: f"`{m.group(1).strip()}`", result, flags=re.DOTALL)
+
+    # {内容} は通常のコードブロック (```\n内容\n```)
+    result = re.sub(r"\{([^{}]+)\}", lambda m: f"```\n{m.group(1).strip()}\n```", result, flags=re.DOTALL)
 
     # 文字サイズ装飾
-    result = re.sub(r"###(.*?)###", r"# \1", result, flags=re.DOTALL)  # すごくデカく
-    result = re.sub(r"##(.*?)##", r"## \1", result, flags=re.DOTALL)   # デカく
-    result = re.sub(r"#([^#\n]+)#", r"### \1", result, flags=re.DOTALL) # 少しデカく
+    result = re.sub(r"###(.*?)###", lambda m: f"# {m.group(1).strip()}", result, flags=re.DOTALL)
+    result = re.sub(r"##(.*?)##", lambda m: f"## {m.group(1).strip()}", result, flags=re.DOTALL)
+    result = re.sub(r"#([^#\n]+)#", lambda m: f"### {m.group(1).strip()}", result, flags=re.DOTALL)
 
     # 太字装飾
-    result = re.sub(r"\+(.*?)\+", r"**\1**", result, flags=re.DOTALL)
+    result = re.sub(r"\+(.*?)\+", lambda m: f"**{m.group(1).strip()}**", result, flags=re.DOTALL)
 
-    # 特殊記号が含まれていない場合は標準でコードブロック化
-    if not any(c in raw_content for c in ["{", "}", "#", "+"]):
-        return f"```\n{raw_content}\n```"
+    # 連続する無駄な空欄改行を完全に1つの改行へ圧縮
+    result = re.sub(r"\n\s*\n+", "\n", result)
 
     return result
 
@@ -199,7 +200,7 @@ class MainHelpSelect(discord.ui.Select):
                 description="自販機に納品する在庫データを管理します。\n\n"
                             "**【コマンド】**\n"
                             "・`/在庫追加 <vending_machine_id>` : 商品に在庫を追加します。\n"
-                            "  ※ `{内容}` または `{{内容}}` でコード枠指定。\n"
+                            "  ※ `{{内容}}` でインラインコード枠、`{内容}` でコードブロック。\n"
                             "  ※ `#内容#` で少し大きく、`##内容##` で大きく、`###内容###` ですごく大きく表示。\n"
                             "  ※ `+内容+` で太字に装飾。\n"
                             "・`/在庫内容確認 <vending_machine_id>` : 全在庫を出力します。\n"
@@ -331,7 +332,6 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
         color=discord.Color.green()
     )
 
-    # 余分な空欄改行が発生しないよう \n で結合
     desc_lines = [
         "```\nご購入ありがとうございます\n```",
         f"```\n商品:{item['name']}\n```",
@@ -339,7 +339,9 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
     if delivery_blocks:
         desc_lines.extend(delivery_blocks)
 
-    embed.description = "\n".join(desc_lines)
+    # 空欄改行を除去して結合
+    cleaned_desc = "\n".join([line.strip() for line in desc_lines if line and line.strip()])
+    embed.description = re.sub(r"\n\s*\n+", "\n", cleaned_desc)
 
     try:
         await interaction.user.send(embed=embed)
@@ -708,10 +710,10 @@ class VendingView(discord.ui.View):
             stock_num = "無限" if i_data["type"] == "無限" else str(len(i_data.get("stock_list", [])))
             sold_num = i_data.get("sold_count", 0)
 
-            # 在庫数と売上数の間の空行を削除
+            # 在庫数と売上数の間の空行を除去した完全指定フォーマット
             item_block = (
                 f"```\n"
-                f"{i_data['name']}\n"
+                f"<{i_data['name']}>\n"
                 f"在庫:{stock_num}\n"
                 f"売上:{sold_num}\n"
                 f"```"
@@ -939,7 +941,7 @@ async def delete_vending_machine(interaction: discord.Interaction, vending_machi
 
     target_name = vending_machines[vending_machine_id]["name"]
     embed = discord.Embed(
-        title="# 自販機削除確認",
+        title="自販機削除確認",
         description=f"本当に自販機「{target_name}」を削除しますか？\n**この操作は取り消せません。\nすべての商品と在庫のデータも削除されます。**",
         color=discord.Color.red(),
     )
@@ -1061,7 +1063,7 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
             content = discord.ui.TextInput(
                 label="商品内容",
                 style=discord.TextStyle.paragraph,
-                placeholder="例: {コード} / #少し大# / ##大## / ###特大### / +太字+",
+                placeholder="例: {{インラインコード}} / {コードブロック} / #少し大# / +太字+",
                 required=True,
                 max_length=1500
             )
@@ -1069,9 +1071,11 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
             async def on_submit(self, m_inter: discord.Interaction):
                 if "stock_list" not in item:
                     item["stock_list"] = []
-                item["stock_list"].append(self.content.value)
+                
+                raw_text = self.content.value.strip()
+                item["stock_list"].append(raw_text)
 
-                formatted = format_stock_item(self.content.value)
+                formatted = format_stock_item(raw_text)
                 res_text = f"追加した商品は購入時に送信されます:\n{formatted}"
                 await m_inter.response.send_message(res_text, ephemeral=True)
 
