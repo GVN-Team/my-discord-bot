@@ -316,16 +316,15 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
         content_str = d if isinstance(d, str) else d.get("content", "")
         delivery_blocks.append(format_stock_item(content_str))
 
-    # 指定されたDM送信フォーマット
+    # DM送信用メッセージフォーマット（ご指定の仕様に合わせて作成）
     dm_text = (
-        "# **✅購入が完了しました**\n"
+        "## **✅購入が完了しました**\n"
         "```\nご購入ありがとうございます\n```\n"
         f"```\n商品:{item['name']}\n```\n"
         + "\n".join(delivery_blocks)
     )
 
     try:
-        # ボタンやリスト等のViewは付けずにテキストメッセージのみ送信
         await interaction.user.send(dm_text)
         return True
     except discord.Forbidden:
@@ -389,7 +388,7 @@ class PayPayPaymentModal(discord.ui.Modal, title="PayPay決済"):
 
         self.paypay_link = discord.ui.TextInput(
             label="PayPayリンク",
-            placeholder="[https://pay.paypay.ne.jp/](https://pay.paypay.ne.jp/)...",
+            placeholder="https://pay.paypay.ne.jp/...",
             required=True
         )
         self.passcode = discord.ui.TextInput(
