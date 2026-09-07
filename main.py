@@ -139,8 +139,7 @@ def format_stock_item(raw_content: str) -> str:
     result = raw_content.strip()
 
     result = result.replace("\\n", "\n")
-    # 余白をなくすため改行を極力除去してコードブロック化
-    result = re.sub(r"\{\{(.*?)\}\}", lambda m: f"```\n{m.group(1).strip()}```", result, flags=re.DOTALL)
+    result = re.sub(r"\{\{(.*?)\}\}", lambda m: f"```\n{m.group(1).strip()}\n```", result, flags=re.DOTALL)
     result = re.sub(r"(?<!\{)\{([^{}\n]+)\}(?!\})", lambda m: f"`{m.group(1).strip()}`", result)
 
     result = re.sub(r"###(.*?)###", lambda m: f"# {m.group(1).strip()}", result, flags=re.DOTALL)
@@ -443,12 +442,12 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 ch_mention = interaction.channel.mention
 
                 proof_desc = (
-                    f"### **購入者**\n```\n{user_disp}```\n"
-                    f"### **チャンネル**\n```\n{ch_mention}```\n"
-                    f"### **自販機**\n```\n{vm_name}```\n"
-                    f"### **商品名**\n```\n{item['name']}```\n"
-                    f"### **個数**\n```\n{qty}```\n"
-                    f"### **購入日**\n```\n{now_str}```"
+                    f"購入者{user_disp}\n"
+                    f"チャンネル{ch_mention}\n"
+                    f"自販機`{vm_name}`\n"
+                    f"商品名`{item['name']}`\n"
+                    f"個数`{qty}`\n"
+                    f"購入日`{now_str}`"
                 )
                 proof_embed = discord.Embed(description=proof_desc, color=discord.Color.green())
                 await target_channel.send(embed=proof_embed)
@@ -831,7 +830,8 @@ class VendingView(discord.ui.View):
                 f"```\n"
                 f"<{i_data['name']}>\n"
                 f"在庫:{stock_num}\n"
-                f"売上:{sold_num}```"
+                f"売上:{sold_num}\n"
+                f"```"
             )
             stock_info.append(item_block)
 
@@ -1121,7 +1121,7 @@ async def place_vending_machine(interaction: discord.Interaction, vending_machin
         if item.get("description"):
             field_lines.append(item["description"])
 
-        field_lines.append(f"```\nマネー:{item['money']}/マネーライト:{item['manera']}```")
+        field_lines.append(f"```\nマネー:{item['money']}/マネーライト:{item['manera']}\n```")
 
         embed.add_field(name="\u200b", value="\n".join(field_lines), inline=False)
 
@@ -1230,11 +1230,11 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
                         ch_mention = m_inter.channel.mention
 
                         add_desc = (
-                            f"### **チャンネル**\n```\n{ch_mention}```\n"
-                            f"### **自販機**\n```\n{vm_name}```\n"
-                            f"### **商品名**\n```\n{item['name']}```\n"
-                            f"### **個数**\n```\n{added_count}```\n"
-                            f"### **追加日**\n```\n{now_str}```"
+                            f"チャンネル{ch_mention}\n"
+                            f"自販機`{vm_name}`\n"
+                            f"商品名`{item['name']}`\n"
+                            f"個数`{added_count}`\n"
+                            f"追加日`{now_str}`"
                         )
                         add_embed = discord.Embed(description=add_desc, color=discord.Color.green())
                         await target_channel.send(embed=add_embed)
