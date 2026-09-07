@@ -3,106 +3,18 @@ import uuid
 import re
 import json
 import io
-import sqlite3
+import asyncio
 from datetime import datetime, timezone, timedelta
 from threading import Thread
 
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 from flask import Flask
 
 from paypay import PayPay, PayPayError, PayPayLoginError, PayPayNetWorkError, load_tokens
 
-# 日本時間 (JST) の定義
 JST = timezone(timedelta(hours=9))
-
-# データベース初期化
-DB_PATH = "database.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS purchase_role_settings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            vending_machine_id TEXT,
-            role_id INTEGER,
-            type TEXT,
-            item_id TEXT,
-            deadline TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS temp_roles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER,
-            user_id INTEGER,
-            role_id INTEGER,
-            expires_at REAL
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def save_purchase_role_setting(v_id: str, role_id: int, type_str: str, item_id: str, deadline: str):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO purchase_role_settings (vending_machine_id, role_id, type, item_id, deadline)
-        VALUES (?, ?, ?, ?, ?)
-    """, (v_id, role_id, type_str, item_id, deadline))
-    conn.commit()
-    conn.close()
-
-def get_purchase_role_settings(v_id: str, item_id: str):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        SELECT role_id, deadline FROM purchase_role_settings
-        WHERE vending_machine_id = ? AND (type = 'All' OR (type = 'one' AND item_id = ?))
-    """, (v_id, item_id))
-    rows = c.fetchall()
-    conn.close()
-    return [{"role_id": r[0], "deadline": r[1]} for r in rows]
-
-def save_temp_role(guild_id: int, user_id: int, role_id: int, expires_at: float):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO temp_roles (guild_id, user_id, role_id, expires_at)
-        VALUES (?, ?, ?, ?)
-    """, (guild_id, user_id, role_id, expires_at))
-    conn.commit()
-    conn.close()
-
-def get_expired_temp_roles(now_ts: float):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT id, guild_id, user_id, role_id FROM temp_roles WHERE expires_at <= ?", (now_ts,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def remove_temp_role(rec_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM temp_roles WHERE id = ?", (rec_id,))
-    conn.commit()
-    conn.close()
-
-def parse_deadline(deadline_str: str):
-    if not deadline_str:
-        return None
-    match = re.match(r"^(\d+)([smhd])$", deadline_str.lower().strip())
-    if not match:
-        return None
-    val, unit = int(match.group(1)), match.group(2)
-    if unit == 's': return val
-    if unit == 'm': return val * 60
-    if unit == 'h': return val * 3600
-    if unit == 'd': return val * 86400
-    return None
 
 app = Flask("")
 
@@ -118,14 +30,47 @@ def keep_alive():
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 vending_machines = {}
 coupons = {}
 proof_settings = {}        # 実績通知設定 {v_id: {"channel_id": int, "type": str}}
 stock_add_settings = {}    # 在庫追加通知設定 {v_id: {"channel_id": int}}
+purchase_role_settings = {} # 購入ロール設定 {v_id: [{"role_id": int, "type": str, "item_id": str, "deadline": str}]}
 paypay_client = None
+
+def parse_deadline(deadline_str: str) -> int:
+    if not deadline_str:
+        return None
+    match = re.match(r"^(\d+)([dhms])$", deadline_str.lower().strip())
+    if not match:
+        return None
+    num, unit = match.groups()
+    num = int(num)
+    if unit == "d":
+        return num * 86400
+    elif unit == "h":
+        return num * 3600
+    elif unit == "m":
+        return num * 60
+    elif unit == "s":
+        return num
+    return None
+
+async def apply_purchase_role(member: discord.Member, role: discord.Role, deadline_str: str):
+    try:
+        await member.add_roles(role)
+        seconds = parse_deadline(deadline_str)
+        if seconds and seconds > 0:
+            async def remove_role_later():
+                await asyncio.sleep(seconds)
+                try:
+                    await member.remove_roles(role)
+                except Exception:
+                    pass
+            asyncio.create_task(remove_role_later())
+    except Exception as e:
+        print(f"ロール付与失敗: {e}")
 
 def parse_color(color_hex: str) -> discord.Color:
     match = re.search(r"^#?([0-9a-fA-F]{6})$", color_hex)
@@ -135,14 +80,27 @@ def parse_color(color_hex: str) -> discord.Color:
 
 def format_stock_item(raw_content: str) -> str:
     result = raw_content.strip()
+
+    # 文字列としての "\n" を実際の改行コードに置換
     result = result.replace("\\n", "\n")
+
+    # 1. 二重波カッコ {{...}} を コードブロック (```\n...\n```) に変換
     result = re.sub(r"\{\{(.*?)\}\}", lambda m: f"```\n{m.group(1).strip()}\n```", result, flags=re.DOTALL)
+
+    # 2. 単一波カッコ {...} (前後が波カッコでないもの) だけを インラインコード (`...`) に変換
     result = re.sub(r"(?<!\{)\{([^{}\n]+)\}(?!\})", lambda m: f"`{m.group(1).strip()}`", result)
+
+    # 文字サイズ装飾
     result = re.sub(r"###(.*?)###", lambda m: f"# {m.group(1).strip()}", result, flags=re.DOTALL)
     result = re.sub(r"##(.*?)##", lambda m: f"## {m.group(1).strip()}", result, flags=re.DOTALL)
     result = re.sub(r"#([^#\n]+)#", lambda m: f"### {m.group(1).strip()}", result, flags=re.DOTALL)
+
+    # 太字装飾
     result = re.sub(r"\+(.*?)\+", lambda m: f"**{m.group(1).strip()}**", result, flags=re.DOTALL)
+
+    # 連続する不要な改行を整理
     result = re.sub(r"\n\s*\n+", "\n", result)
+
     return result
 
 class CloseTicketButton(discord.ui.Button):
@@ -390,25 +348,6 @@ async def coupon_autocomplete(interaction: discord.Interaction, current: str):
         if current.lower() in code.lower()
     ][:25]
 
-async def process_purchase_roles(guild: discord.Guild, member: discord.Member, v_id: str, item_id: str):
-    if not guild or not member:
-        return
-    settings = get_purchase_role_settings(v_id, item_id)
-    for setting in settings:
-        role_id = setting["role_id"]
-        deadline = setting["deadline"]
-        role = guild.get_role(role_id)
-        if role:
-            try:
-                await member.add_roles(role)
-                if deadline:
-                    sec = parse_deadline(deadline)
-                    if sec:
-                        expires_at = datetime.now().timestamp() + sec
-                        save_temp_role(guild.id, member.id, role_id, expires_at)
-            except Exception as e:
-                print(f"Role grant error: {e}")
-
 async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_id: str, qty: int) -> bool:
     item = vending_machines.get(v_id, {}).get("items", {}).get(item_id)
     if not item:
@@ -425,11 +364,13 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
 
     item["sold_count"] = item.get("sold_count", 0) + qty
 
+    # 在庫文字列の結合
     raw_stock_content = ""
     for d in drawn:
         content_str = d if isinstance(d, str) else d.get("content", "")
         raw_stock_content += content_str
 
+    # 波カッコエスケープ事故を防ぐ安全な文字列結合
     header = "{{ご購入ありがとうございます}}{{商品:" + item['name'] + "}}"
     full_text = header + raw_stock_content
 
@@ -456,8 +397,13 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 proof_embed = discord.Embed(description=proof_desc, color=discord.Color.green())
                 await target_channel.send(embed=proof_embed)
 
-        # 購入ロールの適用
-        await process_purchase_roles(interaction.guild, interaction.user, v_id, item_id)
+        # 購入ロールの付与処理
+        if v_id in purchase_role_settings:
+            for p_setting in purchase_role_settings[v_id]:
+                if p_setting["type"] == "All" or (p_setting["type"] == "One" and p_setting.get("item_id") == item_id):
+                    role = interaction.guild.get_role(p_setting["role_id"])
+                    if role and isinstance(interaction.user, discord.Member):
+                        await apply_purchase_role(interaction.user, role, p_setting.get("deadline"))
 
         return True
     except discord.Forbidden:
@@ -866,34 +812,6 @@ class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
         except Exception as e:
             await interaction.followup.send(f"❌ ログイン処理エラー: {e}", ephemeral=True)
 
-# 期限切れロール剥奪タスク
-@tasks.loop(seconds=30)
-async def check_expired_roles():
-    now_ts = datetime.now().timestamp()
-    expired = get_expired_temp_roles(now_ts)
-    for record in expired:
-        rec_id, guild_id, user_id, role_id = record
-        guild = bot.get_guild(guild_id)
-        if guild:
-            member = guild.get_member(user_id)
-            if not member:
-                try:
-                    member = await guild.fetch_member(user_id)
-                except Exception:
-                    member = None
-            if member:
-                role = guild.get_role(role_id)
-                if role and role in member.roles:
-                    try:
-                        await member.remove_roles(role)
-                    except Exception as e:
-                        print(f"Failed to remove role: {e}")
-        remove_temp_role(rec_id)
-
-@check_expired_roles.before_loop
-async def before_check_expired_roles():
-    await bot.wait_until_ready()
-
 help_group = app_commands.Group(name="help", description="Botのヘルプを表示します")
 
 @help_group.command(name="all", description="Botの全機能と使い方を表示します")
@@ -909,7 +827,6 @@ async def help_all_cmd(interaction: discord.Interaction):
     embed.add_field(name="🛒 自販機管理", value="`/自販機作成`, `/自販機設置` など", inline=True)
     embed.add_field(name="📦 在庫管理", value="`/在庫追加`, `/在庫内容確認` など", inline=True)
     embed.add_field(name="🏷️ クーポン管理", value="`/クーポン作成`, `/クーポン一覧` など", inline=True)
-    embed.add_field(name="🔑 購入ロール設定", value="`/購入ロール` : ロール自動付与機能", inline=True)
     embed.add_field(name="💾 セーブ/ロード", value="`/save`, `/load` でデータを保管", inline=True)
     embed.add_field(name="🧹 メッセージ削除", value="`/clear` : チャンネルメッセージ削除", inline=True)
 
@@ -932,75 +849,14 @@ async def help_member_cmd(interaction: discord.Interaction):
 
 bot.tree.add_command(help_group)
 
-@bot.tree.command(name="購入ロール", description="商品購入時にロールを自動付与する設定を行います")
-@app_commands.describe(
-    vending_machine_id="対象の自販機",
-    role="付与するロール",
-    type="タイプ (All: すべての商品 / one: 特定の商品)",
-    deadline="期限 (例: 7d, 1h, 30m) ※任意"
-)
-@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
-@app_commands.choices(type=[
-    app_commands.Choice(name="All", value="All"),
-    app_commands.Choice(name="one", value="one")
-])
-async def buy_role_cmd(
-    interaction: discord.Interaction,
-    vending_machine_id: str,
-    role: discord.Role,
-    type: str,
-    deadline: str = None
-):
-    if vending_machine_id not in vending_machines:
-        await interaction.response.send_message("❌ 指定された自販機が存在しません。", ephemeral=True)
-        return
-
-    if deadline and parse_deadline(deadline) is None:
-        await interaction.response.send_message("❌ 期限のフォーマットが正しくありません。(例: 7d=7日間, 1h=1時間, 30m=30分)", ephemeral=True)
-        return
-
-    if type == "All":
-        save_purchase_role_setting(vending_machine_id, role.id, "All", None, deadline)
-        vm_name = vending_machines[vending_machine_id]["name"]
-        dl_text = f"\n期限: `{deadline}`" if deadline else "\n期限: 無期限"
-        await interaction.response.send_message(
-            f"✅ **購入ロール設定完了**\n自販機: `{vm_name}`\n対象: すべての商品\n付与ロール: {role.mention}{dl_text}",
-            ephemeral=True
-        )
-    else:
-        vm = vending_machines[vending_machine_id]
-        if not vm.get("items"):
-            await interaction.response.send_message("❌ この自販機には商品が登録されていません。", ephemeral=True)
-            return
-
-        options = [
-            discord.SelectOption(label=item_data["name"], value=item_id)
-            for item_id, item_data in vm["items"].items()
-        ]
-        select = discord.ui.Select(placeholder="対象の商品を選択してください", options=options)
-
-        async def select_callback(s_inter: discord.Interaction):
-            selected_item_id = select.values[0]
-            item_name = vm["items"][selected_item_id]["name"]
-            save_purchase_role_setting(vending_machine_id, role.id, "one", selected_item_id, deadline)
-            dl_text = f"\n期限: `{deadline}`" if deadline else "\n期限: 無期限"
-            await s_inter.response.send_message(
-                f"✅ **購入ロール設定完了**\n自販機: `{vm['name']}`\n対象商品: `{item_name}`\n付与ロール: {role.mention}{dl_text}",
-                ephemeral=True
-            )
-
-        select.callback = select_callback
-        view = discord.ui.View(timeout=None)
-        view.add_item(select)
-        await interaction.response.send_message("ロール付与の対象となる商品を選択してください：", view=view, ephemeral=True)
-
 @bot.tree.command(name="save", description="現在の自販機・在庫・売上・クーポンデータをテキスト列としてセーブします")
 async def save_cmd(interaction: discord.Interaction):
     data = {
         "vending_machines": vending_machines,
         "coupons": coupons,
         "proof_settings": proof_settings,
-        "stock_add_settings": stock_add_settings
+        "stock_add_settings": stock_add_settings,
+        "purchase_role_settings": purchase_role_settings
     }
     json_str = json.dumps(data, ensure_ascii=False)
     output_text = f"`{json_str}`"
@@ -1021,7 +877,7 @@ async def save_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="load", description="保存したテキスト列を入力して自販機データを復元します")
 @app_commands.describe(data_text="セーブ時に出力されたテキスト列を入力")
 async def load_cmd(interaction: discord.Interaction, data_text: str):
-    global vending_machines, coupons, proof_settings, stock_add_settings
+    global vending_machines, coupons, proof_settings, stock_add_settings, purchase_role_settings
     try:
         clean_text = data_text.strip("` ").strip()
         data = json.loads(clean_text)
@@ -1035,6 +891,8 @@ async def load_cmd(interaction: discord.Interaction, data_text: str):
             proof_settings.update(data.get("proof_settings", {}))
             stock_add_settings.clear()
             stock_add_settings.update(data.get("stock_add_settings", {}))
+            purchase_role_settings.clear()
+            purchase_role_settings.update(data.get("purchase_role_settings", {}))
             await interaction.response.send_message("✅ データを正常に復元（ロード）しました！", ephemeral=True)
         else:
             vending_machines.clear()
@@ -1047,10 +905,6 @@ async def load_cmd(interaction: discord.Interaction, data_text: str):
 @bot.event
 async def on_ready():
     global paypay_client
-
-    init_db()
-    if not check_expired_roles.is_running():
-        check_expired_roles.start()
 
     saved_data = load_tokens()
     if saved_data and saved_data.get("refresh_token"):
@@ -1170,6 +1024,8 @@ async def delete_vending_machine(interaction: discord.Interaction, vending_machi
             del proof_settings[vending_machine_id]
         if vending_machine_id in stock_add_settings:
             del stock_add_settings[vending_machine_id]
+        if vending_machine_id in purchase_role_settings:
+            del purchase_role_settings[vending_machine_id]
         await inter.response.edit_message(content=f"自販機「{target_name}」を完全に削除しました。", embed=None, view=None)
 
     async def cancel_cb(inter: discord.Interaction):
@@ -1457,6 +1313,84 @@ async def remove_stock_add_notification(interaction: discord.Interaction, vendin
         await interaction.response.send_message("✅ 在庫追加通知設定を解除しました。", ephemeral=True)
     else:
         await interaction.response.send_message("⚠️ この自販機には在庫追加通知が設定されていません。", ephemeral=True)
+
+@bot.tree.command(name="購入ロール", description="購入時に付与するロールを設定します")
+@app_commands.describe(
+    vending_machine_id="対象の自販機",
+    role="付与するロール",
+    type="タイプ",
+    deadline="ロールを剥奪するまでの期間 (例: 7d=7日後)"
+)
+@app_commands.choices(type=[
+    app_commands.Choice(name="one", value="one"),
+    app_commands.Choice(name="すべて", value="All")
+])
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+async def purchase_role_cmd(
+    interaction: discord.Interaction,
+    vending_machine_id: str,
+    role: discord.Role,
+    type: str,
+    deadline: str = None
+):
+    if vending_machine_id not in vending_machines:
+        await interaction.response.send_message("❌ 指定された自販機が存在しません。", ephemeral=True)
+        return
+
+    if deadline and not parse_deadline(deadline):
+        await interaction.response.send_message("❌ deadline の形式が正しくありません。(例: 7d, 12h, 30m, 10s)", ephemeral=True)
+        return
+
+    if type == "All":
+        if vending_machine_id not in purchase_role_settings:
+            purchase_role_settings[vending_machine_id] = []
+        purchase_role_settings[vending_machine_id].append({
+            "role_id": role.id,
+            "type": "All",
+            "deadline": deadline
+        })
+        vm_name = vending_machines[vending_machine_id]["name"]
+        await interaction.response.send_message(
+            f"✅ 自販機「{vm_name}」の全商品に対して購入ロール設定を保存しました。\n"
+            f"付与ロール: {role.mention}" + (f"\n剥奪期間: {deadline}" if deadline else ""),
+            ephemeral=True
+        )
+    else:
+        vm_items = vending_machines[vending_machine_id].get("items", {})
+        if not vm_items:
+            await interaction.response.send_message("❌ 指定された自販機に商品が登録されていません。", ephemeral=True)
+            return
+
+        options = [
+            discord.SelectOption(label=item_data["name"], value=item_id)
+            for item_id, item_data in vm_items.items()
+        ]
+        select = discord.ui.Select(placeholder="ロール付与対象の商品を選択してください", options=options)
+
+        async def select_cb(sel_inter: discord.Interaction):
+            selected_item_id = select.values[0]
+            selected_item_name = vm_items[selected_item_id]["name"]
+
+            if vending_machine_id not in purchase_role_settings:
+                purchase_role_settings[vending_machine_id] = []
+            purchase_role_settings[vending_machine_id].append({
+                "role_id": role.id,
+                "type": "One",
+                "item_id": selected_item_id,
+                "deadline": deadline
+            })
+
+            vm_name = vending_machines[vending_machine_id]["name"]
+            await sel_inter.response.send_message(
+                f"✅ 自販機「{vm_name}」の商品「{selected_item_name}」に対して購入ロール設定を保存しました。\n"
+                f"付与ロール: {role.mention}" + (f"\n剥奪期間: {deadline}" if deadline else ""),
+                ephemeral=True
+            )
+
+        select.callback = select_cb
+        view = discord.ui.View(timeout=None)
+        view.add_item(select)
+        await interaction.response.send_message("対象の商品を選択してください：", view=view, ephemeral=True)
 
 @bot.tree.command(name="クーポン作成", description="クーポンを作成します")
 @app_commands.describe(vending_machine_id="クーポンを利用できる自販機", code="クーポンコード", coupon="適用金額")
