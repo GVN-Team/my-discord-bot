@@ -442,12 +442,12 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 ch_mention = interaction.channel.mention
 
                 proof_desc = (
-                    f"### **購入者**```\n{user_disp}\n```\n"
-                    f"### **チャンネル**```\n{ch_mention}\n```\n"
-                    f"### **自販機**```\n{vm_name}\n```\n"
-                    f"### **商品名**```\n{item['name']}\n```\n"
-                    f"### **個数**```\n{qty}\n```\n"
-                    f"### **購入日**```\n{now_str}\n```"
+                    f"### **購入者**```\n{user_disp}```\n"
+                    f"### **チャンネル**```\n{ch_mention}```\n"
+                    f"### **自販機**```\n{vm_name}```\n"
+                    f"### **商品名**```\n{item['name']}```\n"
+                    f"### **個数**```\n{qty}```\n"
+                    f"### **購入日**```\n{now_str}```"
                 )
                 proof_embed = discord.Embed(description=proof_desc, color=discord.Color.green())
                 await target_channel.send(embed=proof_embed)
@@ -1230,11 +1230,11 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
                         ch_mention = m_inter.channel.mention
 
                         add_desc = (
-                            f"### **チャンネル**```\n{ch_mention}\n```\n"
-                            f"### **自販機**```\n{vm_name}\n```\n"
-                            f"### **商品名**```\n{item['name']}\n```\n"
-                            f"### **個数**```\n{added_count}\n```\n"
-                            f"### **追加日**```\n{now_str}\n```"
+                            f"### **チャンネル**```\n{ch_mention}```\n"
+                            f"### **自販機**```\n{vm_name}```\n"
+                            f"### **商品名**```\n{item['name']}```\n"
+                            f"### **個数**```\n{added_count}```\n"
+                            f"### **追加日**```\n{now_str}```"
                         )
                         add_embed = discord.Embed(description=add_desc, color=discord.Color.green())
                         await target_channel.send(embed=add_embed)
