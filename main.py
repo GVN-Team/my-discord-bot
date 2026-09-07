@@ -3,15 +3,106 @@ import uuid
 import re
 import json
 import io
-from datetime import datetime
+import sqlite3
+from datetime import datetime, timezone, timedelta
 from threading import Thread
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from flask import Flask
 
 from paypay import PayPay, PayPayError, PayPayLoginError, PayPayNetWorkError, load_tokens
+
+# 日本時間 (JST) の定義
+JST = timezone(timedelta(hours=9))
+
+# データベース初期化
+DB_PATH = "database.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS purchase_role_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vending_machine_id TEXT,
+            role_id INTEGER,
+            type TEXT,
+            item_id TEXT,
+            deadline TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS temp_roles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER,
+            user_id INTEGER,
+            role_id INTEGER,
+            expires_at REAL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_purchase_role_setting(v_id: str, role_id: int, type_str: str, item_id: str, deadline: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO purchase_role_settings (vending_machine_id, role_id, type, item_id, deadline)
+        VALUES (?, ?, ?, ?, ?)
+    """, (v_id, role_id, type_str, item_id, deadline))
+    conn.commit()
+    conn.close()
+
+def get_purchase_role_settings(v_id: str, item_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT role_id, deadline FROM purchase_role_settings
+        WHERE vending_machine_id = ? AND (type = 'All' OR (type = 'one' AND item_id = ?))
+    """, (v_id, item_id))
+    rows = c.fetchall()
+    conn.close()
+    return [{"role_id": r[0], "deadline": r[1]} for r in rows]
+
+def save_temp_role(guild_id: int, user_id: int, role_id: int, expires_at: float):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO temp_roles (guild_id, user_id, role_id, expires_at)
+        VALUES (?, ?, ?, ?)
+    """, (guild_id, user_id, role_id, expires_at))
+    conn.commit()
+    conn.close()
+
+def get_expired_temp_roles(now_ts: float):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, guild_id, user_id, role_id FROM temp_roles WHERE expires_at <= ?", (now_ts,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def remove_temp_role(rec_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM temp_roles WHERE id = ?", (rec_id,))
+    conn.commit()
+    conn.close()
+
+def parse_deadline(deadline_str: str):
+    if not deadline_str:
+        return None
+    match = re.match(r"^(\d+)([smhd])$", deadline_str.lower().strip())
+    if not match:
+        return None
+    val, unit = int(match.group(1)), match.group(2)
+    if unit == 's': return val
+    if unit == 'm': return val * 60
+    if unit == 'h': return val * 3600
+    if unit == 'd': return val * 86400
+    return None
 
 app = Flask("")
 
@@ -27,6 +118,7 @@ def keep_alive():
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 vending_machines = {}
@@ -43,27 +135,14 @@ def parse_color(color_hex: str) -> discord.Color:
 
 def format_stock_item(raw_content: str) -> str:
     result = raw_content.strip()
-
-    # 文字列としての "\n" を実際の改行コードに置換
     result = result.replace("\\n", "\n")
-
-    # 1. 二重波カッコ {{...}} を コードブロック (```\n...\n```) に変換
     result = re.sub(r"\{\{(.*?)\}\}", lambda m: f"```\n{m.group(1).strip()}\n```", result, flags=re.DOTALL)
-
-    # 2. 単一波カッコ {...} (前後が波カッコでないもの) だけを インラインコード (`...`) に変換
     result = re.sub(r"(?<!\{)\{([^{}\n]+)\}(?!\})", lambda m: f"`{m.group(1).strip()}`", result)
-
-    # 文字サイズ装飾
     result = re.sub(r"###(.*?)###", lambda m: f"# {m.group(1).strip()}", result, flags=re.DOTALL)
     result = re.sub(r"##(.*?)##", lambda m: f"## {m.group(1).strip()}", result, flags=re.DOTALL)
     result = re.sub(r"#([^#\n]+)#", lambda m: f"### {m.group(1).strip()}", result, flags=re.DOTALL)
-
-    # 太字装飾
     result = re.sub(r"\+(.*?)\+", lambda m: f"**{m.group(1).strip()}**", result, flags=re.DOTALL)
-
-    # 連続する不要な改行を整理
     result = re.sub(r"\n\s*\n+", "\n", result)
-
     return result
 
 class CloseTicketButton(discord.ui.Button):
@@ -311,6 +390,25 @@ async def coupon_autocomplete(interaction: discord.Interaction, current: str):
         if current.lower() in code.lower()
     ][:25]
 
+async def process_purchase_roles(guild: discord.Guild, member: discord.Member, v_id: str, item_id: str):
+    if not guild or not member:
+        return
+    settings = get_purchase_role_settings(v_id, item_id)
+    for setting in settings:
+        role_id = setting["role_id"]
+        deadline = setting["deadline"]
+        role = guild.get_role(role_id)
+        if role:
+            try:
+                await member.add_roles(role)
+                if deadline:
+                    sec = parse_deadline(deadline)
+                    if sec:
+                        expires_at = datetime.now().timestamp() + sec
+                        save_temp_role(guild.id, member.id, role_id, expires_at)
+            except Exception as e:
+                print(f"Role grant error: {e}")
+
 async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_id: str, qty: int) -> bool:
     item = vending_machines.get(v_id, {}).get("items", {}).get(item_id)
     if not item:
@@ -327,13 +425,11 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
 
     item["sold_count"] = item.get("sold_count", 0) + qty
 
-    # 在庫文字列の結合
     raw_stock_content = ""
     for d in drawn:
         content_str = d if isinstance(d, str) else d.get("content", "")
         raw_stock_content += content_str
 
-    # 波カッコエスケープ事故を防ぐ安全な文字列結合
     header = "{{ご購入ありがとうございます}}{{商品:" + item['name'] + "}}"
     full_text = header + raw_stock_content
 
@@ -351,21 +447,17 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
             setting = proof_settings[v_id]
             target_channel = interaction.guild.get_channel(setting["channel_id"])
             if target_channel:
-                user_disp = f"@{interaction.user.name}" if setting["type"] == "表示" else "@不明"
-                now_str = datetime.now().strftime("%Y/%m/%d/%H:%M:%S.%f")[:-3]
+                user_disp = interaction.user.mention if setting["type"] == "表示" else "@不明"
+                now_str = datetime.now(JST).strftime("%Y/%m/%d/%H:%M:%S.%f")[:-3]
                 vm_name = vending_machines[v_id]["name"]
                 ch_mention = interaction.channel.mention
 
-                proof_desc = (
-                    f"購入者\n```\n{user_disp}\n```\n"
-                    f"チャンネル\n```\n{ch_mention}\n```\n"
-                    f"自販機\n```\n{vm_name}\n```\n"
-                    f"商品名\n```\n{item['name']}\n```\n"
-                    f"個数\n```\n{qty}\n```\n"
-                    f"購入日\n```\n{now_str}\n```"
-                )
+                proof_desc = f"### **購入者** {user_disp} **チャンネル** {ch_mention} **自販機** {vm_name} **商品名** {item['name']} **個数** {qty} **購入日** {now_str}"
                 proof_embed = discord.Embed(description=proof_desc, color=discord.Color.green())
                 await target_channel.send(embed=proof_embed)
+
+        # 購入ロールの適用
+        await process_purchase_roles(interaction.guild, interaction.user, v_id, item_id)
 
         return True
     except discord.Forbidden:
@@ -774,6 +866,34 @@ class PayPayOTPModal(discord.ui.Modal, title="PayPay SMS認証"):
         except Exception as e:
             await interaction.followup.send(f"❌ ログイン処理エラー: {e}", ephemeral=True)
 
+# 期限切れロール剥奪タスク
+@tasks.loop(seconds=30)
+async def check_expired_roles():
+    now_ts = datetime.now().timestamp()
+    expired = get_expired_temp_roles(now_ts)
+    for record in expired:
+        rec_id, guild_id, user_id, role_id = record
+        guild = bot.get_guild(guild_id)
+        if guild:
+            member = guild.get_member(user_id)
+            if not member:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except Exception:
+                    member = None
+            if member:
+                role = guild.get_role(role_id)
+                if role and role in member.roles:
+                    try:
+                        await member.remove_roles(role)
+                    except Exception as e:
+                        print(f"Failed to remove role: {e}")
+        remove_temp_role(rec_id)
+
+@check_expired_roles.before_loop
+async def before_check_expired_roles():
+    await bot.wait_until_ready()
+
 help_group = app_commands.Group(name="help", description="Botのヘルプを表示します")
 
 @help_group.command(name="all", description="Botの全機能と使い方を表示します")
@@ -789,6 +909,7 @@ async def help_all_cmd(interaction: discord.Interaction):
     embed.add_field(name="🛒 自販機管理", value="`/自販機作成`, `/自販機設置` など", inline=True)
     embed.add_field(name="📦 在庫管理", value="`/在庫追加`, `/在庫内容確認` など", inline=True)
     embed.add_field(name="🏷️ クーポン管理", value="`/クーポン作成`, `/クーポン一覧` など", inline=True)
+    embed.add_field(name="🔑 購入ロール設定", value="`/購入ロール` : ロール自動付与機能", inline=True)
     embed.add_field(name="💾 セーブ/ロード", value="`/save`, `/load` でデータを保管", inline=True)
     embed.add_field(name="🧹 メッセージ削除", value="`/clear` : チャンネルメッセージ削除", inline=True)
 
@@ -810,6 +931,68 @@ async def help_member_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=MemberHelpView())
 
 bot.tree.add_command(help_group)
+
+@bot.tree.command(name="購入ロール", description="商品購入時にロールを自動付与する設定を行います")
+@app_commands.describe(
+    vending_machine_id="対象の自販機",
+    role="付与するロール",
+    type="タイプ (All: すべての商品 / one: 特定の商品)",
+    deadline="期限 (例: 7d, 1h, 30m) ※任意"
+)
+@app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
+@app_commands.choices(type=[
+    app_commands.Choice(name="All", value="All"),
+    app_commands.Choice(name="one", value="one")
+])
+async def buy_role_cmd(
+    interaction: discord.Interaction,
+    vending_machine_id: str,
+    role: discord.Role,
+    type: str,
+    deadline: str = None
+):
+    if vending_machine_id not in vending_machines:
+        await interaction.response.send_message("❌ 指定された自販機が存在しません。", ephemeral=True)
+        return
+
+    if deadline and parse_deadline(deadline) is None:
+        await interaction.response.send_message("❌ 期限のフォーマットが正しくありません。(例: 7d=7日間, 1h=1時間, 30m=30分)", ephemeral=True)
+        return
+
+    if type == "All":
+        save_purchase_role_setting(vending_machine_id, role.id, "All", None, deadline)
+        vm_name = vending_machines[vending_machine_id]["name"]
+        dl_text = f"\n期限: `{deadline}`" if deadline else "\n期限: 無期限"
+        await interaction.response.send_message(
+            f"✅ **購入ロール設定完了**\n自販機: `{vm_name}`\n対象: すべての商品\n付与ロール: {role.mention}{dl_text}",
+            ephemeral=True
+        )
+    else:
+        vm = vending_machines[vending_machine_id]
+        if not vm.get("items"):
+            await interaction.response.send_message("❌ この自販機には商品が登録されていません。", ephemeral=True)
+            return
+
+        options = [
+            discord.SelectOption(label=item_data["name"], value=item_id)
+            for item_id, item_data in vm["items"].items()
+        ]
+        select = discord.ui.Select(placeholder="対象の商品を選択してください", options=options)
+
+        async def select_callback(s_inter: discord.Interaction):
+            selected_item_id = select.values[0]
+            item_name = vm["items"][selected_item_id]["name"]
+            save_purchase_role_setting(vending_machine_id, role.id, "one", selected_item_id, deadline)
+            dl_text = f"\n期限: `{deadline}`" if deadline else "\n期限: 無期限"
+            await s_inter.response.send_message(
+                f"✅ **購入ロール設定完了**\n自販機: `{vm['name']}`\n対象商品: `{item_name}`\n付与ロール: {role.mention}{dl_text}",
+                ephemeral=True
+            )
+
+        select.callback = select_callback
+        view = discord.ui.View(timeout=None)
+        view.add_item(select)
+        await interaction.response.send_message("ロール付与の対象となる商品を選択してください：", view=view, ephemeral=True)
 
 @bot.tree.command(name="save", description="現在の自販機・在庫・売上・クーポンデータをテキスト列としてセーブします")
 async def save_cmd(interaction: discord.Interaction):
@@ -864,6 +1047,10 @@ async def load_cmd(interaction: discord.Interaction, data_text: str):
 @bot.event
 async def on_ready():
     global paypay_client
+
+    init_db()
+    if not check_expired_roles.is_running():
+        check_expired_roles.start()
 
     saved_data = load_tokens()
     if saved_data and saved_data.get("refresh_token"):
@@ -1118,17 +1305,11 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
                     setting = stock_add_settings[vending_machine_id]
                     target_channel = m_inter.guild.get_channel(setting["channel_id"])
                     if target_channel:
-                        now_str = datetime.now().strftime("%Y/%m/%d/%H:%M:%S.%f")[:-3]
+                        now_str = datetime.now(JST).strftime("%Y/%m/%d/%H:%M:%S.%f")[:-3]
                         vm_name = vm["name"]
                         ch_mention = m_inter.channel.mention
 
-                        add_desc = (
-                            f"チャンネル\n```\n{ch_mention}\n```\n"
-                            f"自販機\n```\n{vm_name}\n```\n"
-                            f"商品名\n```\n{item['name']}\n```\n"
-                            f"個数\n```\n{added_count}\n```\n"
-                            f"購入日\n```\n{now_str}\n```"
-                        )
+                        add_desc = f"### **チャンネル** {ch_mention} **自販機** {vm_name} **商品名** {item['name']} **個数** {added_count} **追加日** {now_str}"
                         add_embed = discord.Embed(description=add_desc, color=discord.Color.green())
                         await target_channel.send(embed=add_embed)
 
