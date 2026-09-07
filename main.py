@@ -444,10 +444,10 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 proof_desc = (
                     f"購入者{user_disp}\n"
                     f"チャンネル{ch_mention}\n"
-                    f"自販機`{vm_name}`\n"
-                    f"商品名`{item['name']}`\n"
-                    f"個数`{qty}`\n"
-                    f"購入日`{now_str}`"
+                    f"自販機```\n{vm_name}\n```"
+                    f"商品名```\n{item['name']}\n```"
+                    f"個数```\n{qty}\n```"
+                    f"購入日```\n{now_str}\n```"
                 )
                 proof_embed = discord.Embed(description=proof_desc, color=discord.Color.green())
                 await target_channel.send(embed=proof_embed)
@@ -1231,10 +1231,10 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
 
                         add_desc = (
                             f"チャンネル{ch_mention}\n"
-                            f"自販機`{vm_name}`\n"
-                            f"商品名`{item['name']}`\n"
-                            f"個数`{added_count}`\n"
-                            f"追加日`{now_str}`"
+                            f"自販機```\n{vm_name}\n```"
+                            f"商品名```\n{item['name']}\n```"
+                            f"個数```\n{added_count}\n```"
+                            f"追加日```\n{now_str}\n```"
                         )
                         add_embed = discord.Embed(description=add_desc, color=discord.Color.green())
                         await target_channel.send(embed=add_embed)
