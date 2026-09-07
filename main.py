@@ -37,7 +37,6 @@ data_collection = None
 
 if MONGO_URI:
     try:
-        # 空白などが混ざっていた場合の除去
         MONGO_URI = MONGO_URI.strip()
         mongo_client = MongoClient(MONGO_URI)
         db = mongo_client["discord_bot"]
@@ -414,7 +413,6 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
 
     item["sold_count"] = item.get("sold_count", 0) + qty
 
-    # 在庫減・売上増をDBへ即時反映
     save_to_db()
 
     raw_stock_content = ""
@@ -443,7 +441,14 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 vm_name = vending_machines[v_id]["name"]
                 ch_mention = interaction.channel.mention
 
-                proof_desc = f"### **購入者** {user_disp} **チャンネル** {ch_mention} **自販機** {vm_name} **商品名** {item['name']} **個数** {qty} **購入日** {now_str}"
+                proof_desc = (
+                    f"購入者{user_disp}\n"
+                    f"チャンネル{ch_mention}\n"
+                    f"自販機`{vm_name}`\n"
+                    f"商品名`{item['name']}`\n"
+                    f"個数`{qty}`\n"
+                    f"購入日`{now_str}`"
+                )
                 proof_embed = discord.Embed(description=proof_desc, color=discord.Color.green())
                 await target_channel.send(embed=proof_embed)
 
@@ -959,7 +964,6 @@ async def load_cmd(interaction: discord.Interaction, data_text: str):
 async def on_ready():
     global paypay_client
 
-    # 起動時に MongoDB からデータを復元
     load_from_db()
 
     saved_data = load_tokens()
@@ -1225,7 +1229,13 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
                         vm_name = vm["name"]
                         ch_mention = m_inter.channel.mention
 
-                        add_desc = f"### **チャンネル** {ch_mention} **自販機** {vm_name} **商品名** {item['name']} **個数** {added_count} **追加日** {now_str}"
+                        add_desc = (
+                            f"チャンネル{ch_mention}\n"
+                            f"自販機`{vm_name}`\n"
+                            f"商品名`{item['name']}`\n"
+                            f"個数`{added_count}`\n"
+                            f"追加日`{now_str}`"
+                        )
                         add_embed = discord.Embed(description=add_desc, color=discord.Color.green())
                         await target_channel.send(embed=add_embed)
 
