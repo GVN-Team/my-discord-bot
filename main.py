@@ -11,6 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from flask import Flask
+from pymongo import MongoClient
 
 from paypay import PayPay, PayPayError, PayPayLoginError, PayPayNetWorkError, load_tokens
 
@@ -28,6 +29,23 @@ def run():
 def keep_alive():
     Thread(target=run).start()
 
+# --- MongoDB 接続設定 ---
+MONGO_URI = os.getenv("MONGO_URI") or os.getenv("KEY")
+mongo_client = None
+db = None
+data_collection = None
+
+if MONGO_URI:
+    try:
+        # 空白などが混ざっていた場合の除去
+        MONGO_URI = MONGO_URI.strip()
+        mongo_client = MongoClient(MONGO_URI)
+        db = mongo_client["discord_bot"]
+        data_collection = db["bot_data"]
+        print("MongoDB に接続成功しました。")
+    except Exception as e:
+        print(f"MongoDB 接続エラー: {e}")
+
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -38,6 +56,46 @@ proof_settings = {}        # 実績通知設定 {v_id: {"channel_id": int, "type
 stock_add_settings = {}    # 在庫追加通知設定 {v_id: {"channel_id": int}}
 purchase_role_settings = {} # 購入ロール設定 {v_id: [{"role_id": int, "type": str, "item_id": str, "deadline": str}]}
 paypay_client = None
+
+# --- MongoDB 保存・復元関数 ---
+def save_to_db():
+    """メモリ上の全データを MongoDB へ保存"""
+    if data_collection is None:
+        return
+    data = {
+        "_id": "main_data",
+        "vending_machines": vending_machines,
+        "coupons": coupons,
+        "proof_settings": proof_settings,
+        "stock_add_settings": stock_add_settings,
+        "purchase_role_settings": purchase_role_settings
+    }
+    try:
+        data_collection.replace_one({"_id": "main_data"}, data, upsert=True)
+    except Exception as e:
+        print(f"MongoDB 保存エラー: {e}")
+
+def load_from_db():
+    """MongoDB から全データを復元"""
+    global vending_machines, coupons, proof_settings, stock_add_settings, purchase_role_settings
+    if data_collection is None:
+        return
+    try:
+        data = data_collection.find_one({"_id": "main_data"})
+        if data:
+            vending_machines.clear()
+            vending_machines.update(data.get("vending_machines", {}))
+            coupons.clear()
+            coupons.update(data.get("coupons", {}))
+            proof_settings.clear()
+            proof_settings.update(data.get("proof_settings", {}))
+            stock_add_settings.clear()
+            stock_add_settings.update(data.get("stock_add_settings", {}))
+            purchase_role_settings.clear()
+            purchase_role_settings.update(data.get("purchase_role_settings", {}))
+            print("MongoDB からデータを正常に復元しました。")
+    except Exception as e:
+        print(f"MongoDB 復元エラー: {e}")
 
 def parse_deadline(deadline_str: str) -> int:
     if not deadline_str:
@@ -81,24 +139,15 @@ def parse_color(color_hex: str) -> discord.Color:
 def format_stock_item(raw_content: str) -> str:
     result = raw_content.strip()
 
-    # 文字列としての "\n" を実際の改行コードに置換
     result = result.replace("\\n", "\n")
-
-    # 1. 二重波カッコ {{...}} を コードブロック (```\n...\n```) に変換
     result = re.sub(r"\{\{(.*?)\}\}", lambda m: f"```\n{m.group(1).strip()}\n```", result, flags=re.DOTALL)
-
-    # 2. 単一波カッコ {...} (前後が波カッコでないもの) だけを インラインコード (`...`) に変換
     result = re.sub(r"(?<!\{)\{([^{}\n]+)\}(?!\})", lambda m: f"`{m.group(1).strip()}`", result)
 
-    # 文字サイズ装飾
     result = re.sub(r"###(.*?)###", lambda m: f"# {m.group(1).strip()}", result, flags=re.DOTALL)
     result = re.sub(r"##(.*?)##", lambda m: f"## {m.group(1).strip()}", result, flags=re.DOTALL)
     result = re.sub(r"#([^#\n]+)#", lambda m: f"### {m.group(1).strip()}", result, flags=re.DOTALL)
 
-    # 太字装飾
     result = re.sub(r"\+(.*?)\+", lambda m: f"**{m.group(1).strip()}**", result, flags=re.DOTALL)
-
-    # 連続する不要な改行を整理
     result = re.sub(r"\n\s*\n+", "\n", result)
 
     return result
@@ -260,7 +309,8 @@ class MainHelpSelect(discord.ui.Select):
             ),
             "save_load": discord.Embed(
                 title="💾 データ保存・復元の詳細",
-                description="再デプロイ等でBotのデータが消えるのを防ぐ機能です。\n\n"
+                description="再デプロイ等でBotのデータが消えるのを防ぐ機能です。\n"
+                            "※ MongoDB Atlasに自動保存されているため、通常手動実行は不要です。\n\n"
                             "**【コマンド】**\n"
                             "・`/save` : 自販機・在庫・売上データをインラインコード文字列で出力します。\n"
                             "・`/load <data_text>` : 出力されたテキストを入力してデータを復元します。",
@@ -364,13 +414,14 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
 
     item["sold_count"] = item.get("sold_count", 0) + qty
 
-    # 在庫文字列の結合
+    # 在庫減・売上増をDBへ即時反映
+    save_to_db()
+
     raw_stock_content = ""
     for d in drawn:
         content_str = d if isinstance(d, str) else d.get("content", "")
         raw_stock_content += content_str
 
-    # 波カッコエスケープ事故を防ぐ安全な文字列結合
     header = "{{ご購入ありがとうございます}}{{商品:" + item['name'] + "}}"
     full_text = header + raw_stock_content
 
@@ -383,7 +434,6 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
     try:
         await interaction.user.send(embed=embed)
 
-        # 実績通知の処理
         if v_id in proof_settings:
             setting = proof_settings[v_id]
             target_channel = interaction.guild.get_channel(setting["channel_id"])
@@ -397,7 +447,6 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 proof_embed = discord.Embed(description=proof_desc, color=discord.Color.green())
                 await target_channel.send(embed=proof_embed)
 
-        # 購入ロールの付与処理
         if v_id in purchase_role_settings:
             for p_setting in purchase_role_settings[v_id]:
                 if p_setting["type"] == "All" or (p_setting["type"] == "One" and p_setting.get("item_id") == item_id):
@@ -675,6 +724,7 @@ class EditItemModal(discord.ui.Modal, title="商品内容変更"):
         item["money"] = m_val
         item["manera"] = ml_val
 
+        save_to_db()
         await interaction.response.send_message(f"商品「{self.item_name.value}」の内容を更新しました。", ephemeral=True)
 
 class EditItemSelect(discord.ui.Select):
@@ -712,6 +762,7 @@ class DeleteItemSelect(discord.ui.Select):
 
         async def confirm_callback(inter: discord.Interaction):
             del vending_machines[self.v_id]["items"][item_id]
+            save_to_db()
             await inter.response.edit_message(content=f"選択した商品「{item_name}」を削除しました。", view=None)
 
         async def cancel_callback(inter: discord.Interaction):
@@ -851,6 +902,7 @@ bot.tree.add_command(help_group)
 
 @bot.tree.command(name="save", description="現在の自販機・在庫・売上・クーポンデータをテキスト列としてセーブします")
 async def save_cmd(interaction: discord.Interaction):
+    save_to_db()
     data = {
         "vending_machines": vending_machines,
         "coupons": coupons,
@@ -864,13 +916,13 @@ async def save_cmd(interaction: discord.Interaction):
     if len(output_text) > 2000:
         file_obj = io.BytesIO(json_str.encode('utf-8'))
         await interaction.response.send_message(
-            "⚠️ データ量が多く2000文字を超えたため、テキストファイルとして出力しました。\n中身のテキストをコピーして `/load` で読み込んでください。",
+            "⚠️ データ量が多く2000文字を超えたため、テキストファイルとして出力しました。\n(クラウド(MongoDB)へも保存が完了しています)",
             file=discord.File(fp=file_obj, filename="save_data.json"),
             ephemeral=True
         )
     else:
         await interaction.response.send_message(
-            f"✅ **セーブデータを出力しました！**\n下記のテキストをコピーし、`/load` コマンドに入力して復元してください：\n{output_text}",
+            f"✅ **クラウドおよびローカルに出力保存しました！**\n{output_text}",
             ephemeral=True
         )
 
@@ -893,11 +945,12 @@ async def load_cmd(interaction: discord.Interaction, data_text: str):
             stock_add_settings.update(data.get("stock_add_settings", {}))
             purchase_role_settings.clear()
             purchase_role_settings.update(data.get("purchase_role_settings", {}))
-            await interaction.response.send_message("✅ データを正常に復元（ロード）しました！", ephemeral=True)
         else:
             vending_machines.clear()
             vending_machines.update(data)
-            await interaction.response.send_message("✅ 自販機データを正常に復元（ロード）しました！", ephemeral=True)
+
+        save_to_db()
+        await interaction.response.send_message("✅ データを正常に復元（ロード）しクラウドに保存しました！", ephemeral=True)
 
     except Exception as e:
         await interaction.response.send_message(f"❌ データのロードに失敗しました。セーブデータのテキスト列が正しいか確認してください。\n詳細: `{e}`", ephemeral=True)
@@ -905,6 +958,9 @@ async def load_cmd(interaction: discord.Interaction, data_text: str):
 @bot.event
 async def on_ready():
     global paypay_client
+
+    # 起動時に MongoDB からデータを復元
+    load_from_db()
 
     saved_data = load_tokens()
     if saved_data and saved_data.get("refresh_token"):
@@ -997,6 +1053,7 @@ async def paypay_login_cmd(interaction: discord.Interaction, phone: str, passwor
 async def create_vending_machine(interaction: discord.Interaction, name: str):
     v_id = str(uuid.uuid4())
     vending_machines[v_id] = {"name": name, "items": {}}
+    save_to_db()
     await interaction.response.send_message(f"自販機「{name}」を作成しました。(ID: `{v_id}`)", ephemeral=True)
 
 @bot.tree.command(name="自販機削除", description="自販機を完全に削除します。")
@@ -1026,6 +1083,7 @@ async def delete_vending_machine(interaction: discord.Interaction, vending_machi
             del stock_add_settings[vending_machine_id]
         if vending_machine_id in purchase_role_settings:
             del purchase_role_settings[vending_machine_id]
+        save_to_db()
         await inter.response.edit_message(content=f"自販機「{target_name}」を完全に削除しました。", embed=None, view=None)
 
     async def cancel_cb(inter: discord.Interaction):
@@ -1086,6 +1144,7 @@ async def add_item(interaction: discord.Interaction, vending_machine_id: str, ty
         "stock_list": [],
         "sold_count": 0,
     }
+    save_to_db()
 
     vm_name = vending_machines[vending_machine_id]["name"]
     await interaction.response.send_message(f"自販機「{vm_name}」に商品名「{name}」を追加しました。", ephemeral=True)
@@ -1148,6 +1207,7 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
                 
                 raw_text = self.content.value.strip()
                 item["stock_list"].append(raw_text)
+                save_to_db()
 
                 added_count = len([x for x in raw_text.split("\\n") if x.strip()])
                 if added_count == 0:
@@ -1234,6 +1294,7 @@ async def withdraw_stock(interaction: discord.Interaction, vending_machine_id: s
 
         drawn = stock_list[:quantity]
         item["stock_list"] = stock_list[quantity:]
+        save_to_db()
 
         drawn_text = "\n".join([format_stock_item(d if isinstance(d, str) else d.get("content", "")) for d in drawn])
         await inter.response.send_message(f"在庫「\n{drawn_text}\n」を引き出しました。", ephemeral=True)
@@ -1263,6 +1324,7 @@ async def set_proof_notification(interaction: discord.Interaction, vending_machi
         "channel_id": channel.id,
         "type": type
     }
+    save_to_db()
 
     vm_name = vending_machines[vending_machine_id]["name"]
     await interaction.response.send_message(
@@ -1278,6 +1340,7 @@ async def set_proof_notification(interaction: discord.Interaction, vending_machi
 async def remove_proof_notification(interaction: discord.Interaction, vending_machine_id: str):
     if vending_machine_id in proof_settings:
         del proof_settings[vending_machine_id]
+        save_to_db()
         await interaction.response.send_message("✅ 実績通知設定を解除しました。", ephemeral=True)
     else:
         await interaction.response.send_message("⚠️ この自販機には実績通知が設定されていません。", ephemeral=True)
@@ -1296,6 +1359,7 @@ async def set_stock_add_notification(interaction: discord.Interaction, vending_m
     stock_add_settings[vending_machine_id] = {
         "channel_id": channel.id
     }
+    save_to_db()
 
     vm_name = vending_machines[vending_machine_id]["name"]
     await interaction.response.send_message(
@@ -1310,6 +1374,7 @@ async def set_stock_add_notification(interaction: discord.Interaction, vending_m
 async def remove_stock_add_notification(interaction: discord.Interaction, vending_machine_id: str):
     if vending_machine_id in stock_add_settings:
         del stock_add_settings[vending_machine_id]
+        save_to_db()
         await interaction.response.send_message("✅ 在庫追加通知設定を解除しました。", ephemeral=True)
     else:
         await interaction.response.send_message("⚠️ この自販機には在庫追加通知が設定されていません。", ephemeral=True)
@@ -1349,6 +1414,7 @@ async def purchase_role_cmd(
             "type": "All",
             "deadline": deadline
         })
+        save_to_db()
         vm_name = vending_machines[vending_machine_id]["name"]
         await interaction.response.send_message(
             f"✅ 自販機「{vm_name}」の全商品に対して購入ロール設定を保存しました。\n"
@@ -1379,6 +1445,7 @@ async def purchase_role_cmd(
                 "item_id": selected_item_id,
                 "deadline": deadline
             })
+            save_to_db()
 
             vm_name = vending_machines[vending_machine_id]["name"]
             await sel_inter.response.send_message(
@@ -1397,6 +1464,7 @@ async def purchase_role_cmd(
 @app_commands.autocomplete(vending_machine_id=vending_machine_autocomplete)
 async def create_coupon(interaction: discord.Interaction, vending_machine_id: str, code: str, coupon: int):
     coupons[code] = {"vm_id": vending_machine_id, "amount": coupon}
+    save_to_db()
     await interaction.response.send_message(
         f"クーポンコード「{code}」を作成しました。\n"
         f"利用可能自販機: `{vending_machine_id}`\n"
@@ -1443,6 +1511,7 @@ async def delete_coupon(interaction: discord.Interaction, code: str):
 
     async def confirm_cb(inter: discord.Interaction):
         del coupons[code]
+        save_to_db()
         res_embed = discord.Embed(title="クーポンコードの削除が完了しました。", color=discord.Color.green())
         await inter.response.edit_message(embed=res_embed, view=None)
 
@@ -1475,6 +1544,6 @@ async def clear_cmd_error(interaction: discord.Interaction, error: app_commands.
 
 if __name__ == "__main__":
     keep_alive()
-    TOKEN = os.getenv("DISCORD_TOKEN")
+    TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("TOKEN") or os.getenv("KEY")
     if TOKEN:
         bot.run(TOKEN)
