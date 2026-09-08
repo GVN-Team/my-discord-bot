@@ -1230,11 +1230,11 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
                         ch_mention = m_inter.channel.mention
 
                         add_desc = (
-                            f"チャンネル{ch_mention}\n"
-                            f"自販機`{vm_name}`\n"
-                            f"商品名`{item['name']}`\n"
-                            f"個数`{added_count}`\n"
-                            f"追加日`{now_str}`"
+                            f"チャンネル\n{ch_mention}\n"
+                            f"自販機\n```{vm_name}```"
+                            f"商品名\n```{item['name']}```"
+                            f"個数\n```{added_count}```"
+                            f"追加日\n```{now_str}```"
                         )
                         add_embed = discord.Embed(description=add_desc, color=discord.Color.green())
                         await target_channel.send(embed=add_embed)
