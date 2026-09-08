@@ -444,10 +444,10 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 proof_desc = (`
                     f"購入者\n{user_disp}\n"
                     f"チャンネル\n{ch_mention}\n"
-                    f"自販機 ``{vm_name}``\n"
-                    f"商品名 ``{item['name']}``\n"
-                    f"個数 ``{qty}``\n"
-                    f"購入日 ``{now_str}``"
+                    f"自販機 ```{vm_name}```\n"
+                    f"商品名 ```{item['name']}```\n"
+                    f"個数 ```{qty}```\n"
+                    f"購入日 ```{now_str}```"
                 )
                 proof_embed = discord.Embed(description=proof_desc, color=discord.Color.green())
                 await target_channel.send(embed=proof_embed)
