@@ -1231,7 +1231,7 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
 
                         add_desc = (
                             f"チャンネル\n{ch_mention}\n"
-                            f"自販機\n```{vm_name}```"
+                            f"### **自販機**\n```{vm_name}```"
                             f"商品名\n```{item['name']}```"
                             f"個数\n```{added_count}```"
                             f"追加日\n```{now_str}```"
