@@ -442,8 +442,8 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 ch_mention = interaction.channel.mention
 
                 proof_desc = (
-                    f"購入者\n{user_disp}\n"
-                    f"チャンネル\n{ch_mention}\n"
+                    f"### **購入者**\n{user_disp}\n"
+                    f"### **チャンネル**\n{ch_mention}\n"
                     f"自販機\n```{vm_name}```"
                     f"商品名\n```{item['name']}```"
                     f"個数\n```{qty}```"
@@ -1230,8 +1230,8 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
                         ch_mention = m_inter.channel.mention
 
                         add_desc = (
-                            f"チャンネル\n{ch_mention}\n"
-                            f"### **自販機**```{vm_name}```"
+                            f"### **チャンネル**\n{ch_mention}\n"
+                            f"自販機\n```{vm_name}```"
                             f"商品名\n```{item['name']}```"
                             f"個数\n```{added_count}```"
                             f"追加日\n```{now_str}```"
