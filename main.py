@@ -442,8 +442,10 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 ch_mention = interaction.channel.mention
 
                 proof_desc = (
-                    f"### **購入者**\n### {user_disp}\n"
-                    f"### **チャンネル**\n### {ch_mention}\n"
+                    f"### **購入者**
+### {user_disp}\n"
+                    f"### **チャンネル**
+### {ch_mention}\n"
                     f"自販機\n```{vm_name}```"
                     f"商品名\n```{item['name']}```"
                     f"個数\n```{qty}```"
