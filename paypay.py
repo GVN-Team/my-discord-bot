@@ -1,6 +1,7 @@
 import os
 import json
 import datetime
+import re
 from typing import NamedTuple
 from uuid import uuid4
 import requests
@@ -25,6 +26,7 @@ def load_tokens():
             pass
     return None
 
+# User-AgentとClient-Versionを最新系に更新
 headers = {
     "Accept": "application/json, text/plain, */*",
     "User-Agent": "PayPay/4.80.0 (iPhone; iOS 16.5; Scale/3.00)",
@@ -131,10 +133,15 @@ class PayPay:
             if isinstance(e, PayPayLoginError): raise e
             raise PayPayNetWorkError(res.text)
 
+    def _clean_code(self, url: str) -> str:
+        """URLから純粋な verificationCode のみを抽出"""
+        url = url.replace("https://pay.paypay.ne.jp/", "").strip()
+        url = url.split("?")[0]  # クエリパラメータを除去
+        return url
+
     def link_check(self, url: str):
-        if "https://" in url:
-            url = url.replace("https://pay.paypay.ne.jp/", "")
-        param = {"verificationCode": url}
+        code = self._clean_code(url)
+        param = {"verificationCode": code}
         res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
         
         if res.status_code == 401 or (res.headers.get("content-type") == "application/json" and res.json().get("header", {}).get("resultCode") == "S0001"):
@@ -175,11 +182,11 @@ class PayPay:
     def link_receive(self, url: str, password: str = None, link_info: dict = None) -> dict:
         if not self.access_token:
             raise PayPayLoginError("ログイン情報が存在しません")
-        if "https://" in url:
-            url = url.replace("https://pay.paypay.ne.jp/", "")
+            
+        code = self._clean_code(url)
         
         if not link_info:
-            param = {"verificationCode": url}
+            param = {"verificationCode": code}
             res = self.session.get("https://www.paypay.ne.jp/app/v2/p2p-api/getP2PLinkInfo", headers=headers, params=param, proxies=self.proxy)
             if res.status_code == 401 or (res.headers.get("content-type") == "application/json" and res.json().get("header", {}).get("resultCode") == "S0001"):
                 self.refresh_access_token()
@@ -191,21 +198,23 @@ class PayPay:
         
         if link_info["payload"]["orderStatus"] != "PENDING":
             raise PayPayError("すでに 受け取り / 辞退 / キャンセル されているリンクです")
-        if link_info["payload"]["pendingP2PInfo"]["isSetPasscode"] and password == None:
+        if link_info["payload"]["pendingP2PInfo"]["isSetPasscode"] and password is None:
             raise PayPayError("このリンクにはパスワードが設定されています")
         
+        # 受け取り用ペイロード
         payload = {
-            "verificationCode": url,
+            "verificationCode": code,
             "client_uuid": self.client_uuid,
             "requestAt": str(datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime('%Y-%m-%dT%H:%M:%S+0900')),
             "requestId": link_info["payload"]["message"]["data"]["requestId"],
             "orderId": link_info["payload"]["message"]["data"]["orderId"],
             "senderMessageId": link_info["payload"]["message"]["messageId"],
             "senderChannelUrl": link_info["payload"]["message"]["chatRoomId"],
-            "iosMinimumVersion": "3.45.0",
-            "androidMinimumVersion": "3.45.0"
+            "iosMinimumVersion": "4.80.0",
+            "androidMinimumVersion": "4.80.0"
         }
-        if password: payload["passcode"] = password
+        if password:
+            payload["passcode"] = password
 
         receive_res = self.session.post("https://www.paypay.ne.jp/app/v2/p2p-api/acceptP2PSendMoneyLink", json=payload, headers=headers, proxies=self.proxy)
         receive = receive_res.json()
