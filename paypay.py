@@ -26,7 +26,7 @@ def load_tokens():
             pass
     return None
 
-# User-AgentとClient-Versionを最新系に更新
+# PayPay側でブロックされない最新のヘッダー情報
 headers = {
     "Accept": "application/json, text/plain, */*",
     "User-Agent": "PayPay/4.80.0 (iPhone; iOS 16.5; Scale/3.00)",
@@ -134,9 +134,9 @@ class PayPay:
             raise PayPayNetWorkError(res.text)
 
     def _clean_code(self, url: str) -> str:
-        """URLから純粋な verificationCode のみを抽出"""
+        """URLから不要なクエリパラメータを除去し verificationCode のみを抽出"""
         url = url.replace("https://pay.paypay.ne.jp/", "").strip()
-        url = url.split("?")[0]  # クエリパラメータを除去
+        url = url.split("?")[0]
         return url
 
     def link_check(self, url: str):
@@ -168,7 +168,7 @@ class PayPay:
         return LinkInfo(
             link_info["payload"]["sender"]["displayName"],
             link_info["payload"]["sender"]["externalId"],
-            link_info["payload"]["sender"]["photoUrl"],
+            link_info["payload"]["sender"].get("photoUrl", ""),
             link_info["payload"]["pendingP2PInfo"]["orderId"],
             link_info["payload"]["message"]["chatRoomId"],
             link_info["payload"]["pendingP2PInfo"]["amount"],
@@ -201,7 +201,6 @@ class PayPay:
         if link_info["payload"]["pendingP2PInfo"]["isSetPasscode"] and password is None:
             raise PayPayError("このリンクにはパスワードが設定されています")
         
-        # 受け取り用ペイロード
         payload = {
             "verificationCode": code,
             "client_uuid": self.client_uuid,
