@@ -311,8 +311,8 @@ class MainHelpSelect(discord.ui.Select):
                 description="再デプロイ等でBotのデータが消えるのを防ぐ機能です。\n"
                             "※ MongoDB Atlasに自動保存されているため、通常手動実行は不要です。\n\n"
                             "**【コマンド】**\n"
-                            "・`/save` : 自販機・在庫・売上データをインラインコード文字列で出力します。\n"
-                            "・`/load <data_text>` : 出力されたテキストを入力してデータを復元します。",
+                            "・`/save` : 自販機・在庫・売上データを保存し、必要に応じてファイルを出力します。\n"
+                            "・`/load [file] [data_text]` : 添付したJSONファイルまたはテキスト入力でデータを復元します。",
                 color=discord.Color.teal()
             ),
         }
@@ -442,10 +442,8 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 ch_mention = interaction.channel.mention
 
                 proof_desc = (
-                    f"""### **購入者**
-### {user_disp}\n"""
-                    f"### **チャンネル**
-### {ch_mention}\n"
+                    f"### **購入者**\n### {user_disp}\n"
+                    f"### **チャンネル**\n### {ch_mention}\n"
                     f"自販機\n```{vm_name}```"
                     f"商品名\n```{item['name']}```"
                     f"個数\n```{qty}```"
@@ -907,7 +905,7 @@ async def help_member_cmd(interaction: discord.Interaction):
 
 bot.tree.add_command(help_group)
 
-@bot.tree.command(name="save", description="現在の自販機・在庫・売上・クーポンデータをテキスト列としてセーブします")
+@bot.tree.command(name="save", description="現在の自販機・在庫・売上・クーポンデータをテキスト列またはファイルとして出力・セーブします")
 async def save_cmd(interaction: discord.Interaction):
     save_to_db()
     data = {
@@ -917,29 +915,52 @@ async def save_cmd(interaction: discord.Interaction):
         "stock_add_settings": stock_add_settings,
         "purchase_role_settings": purchase_role_settings
     }
-    json_str = json.dumps(data, ensure_ascii=False)
-    output_text = f"`{json_str}`"
+    json_str = json.dumps(data, ensure_ascii=False, indent=2)
 
-    if len(output_text) > 2000:
-        file_obj = io.BytesIO(json_str.encode('utf-8'))
-        await interaction.response.send_message(
-            "⚠️ データ量が多く2000文字を超えたため、テキストファイルとして出力しました。\n(クラウド(MongoDB)へも保存が完了しています)",
-            file=discord.File(fp=file_obj, filename="save_data.json"),
-            ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(
-            f"✅ **クラウドおよびローカルに出力保存しました！**\n{output_text}",
-            ephemeral=True
-        )
+    file_obj = io.BytesIO(json_str.encode('utf-8'))
+    await interaction.response.send_message(
+        "✅ **データを出力しました！**\n(クラウド(MongoDB)への保存も完了しています)",
+        file=discord.File(fp=file_obj, filename="save_data.json"),
+        ephemeral=True
+    )
 
-@bot.tree.command(name="load", description="保存したテキスト列を入力して自販機データを復元します")
-@app_commands.describe(data_text="セーブ時に出力されたテキスト列を入力")
-async def load_cmd(interaction: discord.Interaction, data_text: str):
+@bot.tree.command(name="load", description="JSONファイルを添付するかテキストを入力して自販機データを復元します")
+@app_commands.describe(
+    file="セーブした JSON ファイル (.json)",
+    data_text="セーブ時に出力されたテキスト列（ファイルを添付しない場合に入力）"
+)
+async def load_cmd(
+    interaction: discord.Interaction, 
+    file: discord.Attachment = None, 
+    data_text: str = None
+):
     global vending_machines, coupons, proof_settings, stock_add_settings, purchase_role_settings
+    
+    if not file and not data_text:
+        await interaction.response.send_message(
+            "❌ JSONファイルを添付するか、`data_text` にテキスト列を入力してください。", 
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
     try:
-        clean_text = data_text.strip("` ").strip()
-        data = json.loads(clean_text)
+        raw_json = ""
+        
+        # 1. ファイル添付から読み込み
+        if file:
+            if not file.filename.endswith('.json'):
+                await interaction.followup.send("❌ .json 拡張子のファイルを指定してください。", ephemeral=True)
+                return
+            content = await file.read()
+            raw_json = content.decode('utf-8')
+            
+        # 2. テキスト列から読み込み
+        elif data_text:
+            raw_json = data_text.strip("` ").strip()
+
+        data = json.loads(raw_json)
 
         if "vending_machines" in data:
             vending_machines.clear()
@@ -957,10 +978,10 @@ async def load_cmd(interaction: discord.Interaction, data_text: str):
             vending_machines.update(data)
 
         save_to_db()
-        await interaction.response.send_message("✅ データを正常に復元（ロード）しクラウドに保存しました！", ephemeral=True)
+        await interaction.followup.send("✅ データを正常に復元（ロード）しクラウドに保存しました！", ephemeral=True)
 
     except Exception as e:
-        await interaction.response.send_message(f"❌ データのロードに失敗しました。セーブデータのテキスト列が正しいか確認してください。\n詳細: `{e}`", ephemeral=True)
+        await interaction.followup.send(f"❌ データのロードに失敗しました。ファイル内容またはテキスト列が正しいJSON形式か確認してください。\n詳細: `{e}`", ephemeral=True)
 
 @bot.event
 async def on_ready():
