@@ -311,8 +311,8 @@ class MainHelpSelect(discord.ui.Select):
                 description="再デプロイ等でBotのデータが消えるのを防ぐ機能です。\n"
                             "※ MongoDB Atlasに自動保存されているため、通常手動実行は不要です。\n\n"
                             "**【コマンド】**\n"
-                            "・`/save` : 自販機・在庫・売上データを保存し、必要に応じてファイルを出力します。\n"
-                            "・`/load [file] [data_text]` : 添付したJSONファイルまたはテキスト入力でデータを復元します。",
+                            "・`/save` : 自販機・在庫・売上データをテキストまたはJSONファイルで出力します。\n"
+                            "・`/load [data_text] [file]` : 出力されたテキストまたは .json ファイルからデータを復元します。",
                 color=discord.Color.teal()
             ),
         }
@@ -442,12 +442,12 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 ch_mention = interaction.channel.mention
 
                 proof_desc = (
-                    f"### **購入者**\n### {user_disp}\n"
-                    f"### **チャンネル**\n### {ch_mention}\n"
-                    f"自販機\n```{vm_name}```"
-                    f"商品名\n```{item['name']}```"
-                    f"個数\n```{qty}```"
-                    f"購入日\n```{now_str}```"
+                    f"**購入者**\n### {user_disp}\n"
+                    f"**チャンネル**\n### {ch_mention}\n"
+                    f"**自販機**\n```{vm_name}```"
+                    f"**商品名**\n```{item['name']}```"
+                    f"**個数**\n```{qty}```"
+                    f"**購入日**\n```{now_str}```"
                 )
                 proof_embed = discord.Embed(description=proof_desc, color=discord.Color.green())
                 await target_channel.send(embed=proof_embed)
@@ -905,7 +905,7 @@ async def help_member_cmd(interaction: discord.Interaction):
 
 bot.tree.add_command(help_group)
 
-@bot.tree.command(name="save", description="現在の自販機・在庫・売上・クーポンデータをテキスト列またはファイルとして出力・セーブします")
+@bot.tree.command(name="save", description="現在の自販機・在庫・売上・クーポンデータをテキスト列としてセーブします")
 async def save_cmd(interaction: discord.Interaction):
     save_to_db()
     data = {
@@ -915,52 +915,45 @@ async def save_cmd(interaction: discord.Interaction):
         "stock_add_settings": stock_add_settings,
         "purchase_role_settings": purchase_role_settings
     }
-    json_str = json.dumps(data, ensure_ascii=False, indent=2)
+    json_str = json.dumps(data, ensure_ascii=False)
+    output_text = f"`{json_str}`"
 
-    file_obj = io.BytesIO(json_str.encode('utf-8'))
-    await interaction.response.send_message(
-        "✅ **データを出力しました！**\n(クラウド(MongoDB)への保存も完了しています)",
-        file=discord.File(fp=file_obj, filename="save_data.json"),
-        ephemeral=True
-    )
-
-@bot.tree.command(name="load", description="JSONファイルを添付するかテキストを入力して自販機データを復元します")
-@app_commands.describe(
-    file="セーブした JSON ファイル (.json)",
-    data_text="セーブ時に出力されたテキスト列（ファイルを添付しない場合に入力）"
-)
-async def load_cmd(
-    interaction: discord.Interaction, 
-    file: discord.Attachment = None, 
-    data_text: str = None
-):
-    global vending_machines, coupons, proof_settings, stock_add_settings, purchase_role_settings
-    
-    if not file and not data_text:
+    if len(output_text) > 2000:
+        file_obj = io.BytesIO(json_str.encode('utf-8'))
         await interaction.response.send_message(
-            "❌ JSONファイルを添付するか、`data_text` にテキスト列を入力してください。", 
+            "⚠️ データ量が多く2000文字を超えたため、テキストファイルとして出力しました。\n(クラウド(MongoDB)へも保存が完了しています)",
+            file=discord.File(fp=file_obj, filename="save_data.json"),
             ephemeral=True
         )
+    else:
+        await interaction.response.send_message(
+            f"✅ **クラウドおよびローカルに出力保存しました！**\n{output_text}",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="load", description="保存したテキストまたはJSONファイルから自販機データを復元します")
+@app_commands.describe(
+    data_text="セーブ時に出力されたテキスト列を入力（ファイル添付時は不要）",
+    file="セーブ時に出力された .json ファイルを添付"
+)
+async def load_cmd(interaction: discord.Interaction, data_text: str = None, file: discord.Attachment = None):
+    global vending_machines, coupons, proof_settings, stock_add_settings, purchase_role_settings
+    
+    if not data_text and not file:
+        await interaction.response.send_message("❌ テキストを入力するか、.json ファイルを添付してください。", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
-
     try:
-        raw_json = ""
-        
-        # 1. ファイル添付から読み込み
         if file:
-            if not file.filename.endswith('.json'):
-                await interaction.followup.send("❌ .json 拡張子のファイルを指定してください。", ephemeral=True)
+            if not file.filename.endswith(".json"):
+                await interaction.response.send_message("❌ `.json` 形式のファイルを添付してください。", ephemeral=True)
                 return
-            content = await file.read()
-            raw_json = content.decode('utf-8')
-            
-        # 2. テキスト列から読み込み
-        elif data_text:
-            raw_json = data_text.strip("` ").strip()
+            file_bytes = await file.read()
+            json_str = file_bytes.decode("utf-8")
+        else:
+            json_str = data_text.strip("` ").strip()
 
-        data = json.loads(raw_json)
+        data = json.loads(json_str)
 
         if "vending_machines" in data:
             vending_machines.clear()
@@ -978,10 +971,10 @@ async def load_cmd(
             vending_machines.update(data)
 
         save_to_db()
-        await interaction.followup.send("✅ データを正常に復元（ロード）しクラウドに保存しました！", ephemeral=True)
+        await interaction.response.send_message("✅ データを正常に復元（ロード）しクラウドに保存しました！", ephemeral=True)
 
     except Exception as e:
-        await interaction.followup.send(f"❌ データのロードに失敗しました。ファイル内容またはテキスト列が正しいJSON形式か確認してください。\n詳細: `{e}`", ephemeral=True)
+        await interaction.response.send_message(f"❌ データのロードに失敗しました。ファイルの内容またはテキスト列が正しいか確認してください。\n詳細: `{e}`", ephemeral=True)
 
 @bot.event
 async def on_ready():
@@ -1253,11 +1246,11 @@ async def add_stock(interaction: discord.Interaction, vending_machine_id: str):
                         ch_mention = m_inter.channel.mention
 
                         add_desc = (
-                            f"### **チャンネル**\n{ch_mention}\n"
-                            f"自販機\n```{vm_name}```"
-                            f"商品名\n```{item['name']}```"
-                            f"個数\n```{added_count}```"
-                            f"追加日\n```{now_str}```"
+                            f"**チャンネル**\n{ch_mention}\n"
+                            f"**自販機**\n```{vm_name}```"
+                            f"**商品名**\n```{item['name']}```"
+                            f"**個数**\n```{added_count}```"
+                            f"**追加日**\n```{now_str}```"
                         )
                         add_embed = discord.Embed(description=add_desc, color=discord.Color.green())
                         await target_channel.send(embed=add_embed)
