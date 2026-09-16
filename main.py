@@ -413,7 +413,18 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
 
     item["sold_count"] = item.get("sold_count", 0) + qty
 
+    # --- DB保存 & Text.json ファイルへ自動出力 ---
     save_to_db()
+
+    export_data = {
+        "vending_machines": vending_machines,
+        "coupons": coupons,
+        "proof_settings": proof_settings,
+        "stock_add_settings": stock_add_settings,
+        "purchase_role_settings": purchase_role_settings
+    }
+    with open("Text.json", "w", encoding="utf-8") as f:
+        json.dump(export_data, f, ensure_ascii=False, indent=2)
 
     raw_stock_content = ""
     for d in drawn:
@@ -430,8 +441,14 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
     )
 
     try:
+        # 購入者に商品を送信
         await interaction.user.send(embed=embed)
 
+        # 最新データの Text.json をDMへ送信
+        with open("Text.json", "rb") as f:
+            await interaction.user.send(content="📄 最新のバックアップデータです:", file=discord.File(f, "Text.json"))
+
+        # 実績通知
         if v_id in proof_settings:
             setting = proof_settings[v_id]
             target_channel = interaction.guild.get_channel(setting["channel_id"])
@@ -452,6 +469,7 @@ async def deliver_items_to_dm(interaction: discord.Interaction, v_id: str, item_
                 proof_embed = discord.Embed(description=proof_desc, color=discord.Color.green())
                 await target_channel.send(embed=proof_embed)
 
+        # 購入ロール付与
         if v_id in purchase_role_settings:
             for p_setting in purchase_role_settings[v_id]:
                 if p_setting["type"] == "All" or (p_setting["type"] == "One" and p_setting.get("item_id") == item_id):
@@ -949,11 +967,18 @@ async def load_cmd(interaction: discord.Interaction, data_text: str = None, file
                 await interaction.response.send_message("❌ `.json` 形式のファイルを添付してください。", ephemeral=True)
                 return
             file_bytes = await file.read()
+            if not file_bytes.strip():
+                await interaction.response.send_message("❌ 添付されたファイルの中身が空です。", ephemeral=True)
+                return
             json_str = file_bytes.decode("utf-8")
         else:
             json_str = data_text.strip("` ").strip()
 
         data = json.loads(json_str)
+
+        if not data or data == {}:
+            await interaction.response.send_message("❌ 読み込んだJSONデータが空データ `{}` です。有効なデータファイルを指定してください。", ephemeral=True)
+            return
 
         if "vending_machines" in data:
             vending_machines.clear()
